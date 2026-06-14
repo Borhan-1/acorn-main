@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/Muhammad Borhan/Documents/ACORN-main/ACORN-main/build/cmake_install.cmake",
+		"C:/Users/Muhammad Borhan/Documents/ACORN-main/ACORN-main/build/faiss/cmake_install.cmake",
+		"C:/Users/Muhammad Borhan/Documents/ACORN-main/ACORN-main/build/demos/cmake_install.cmake",
+		"C:/Users/Muhammad Borhan/Documents/ACORN-main/ACORN-main/build/benchs/cmake_install.cmake",
+		"C:/Users/Muhammad Borhan/Documents/ACORN-main/ACORN-main/build/tutorial/cpp/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
