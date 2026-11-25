@@ -64,6 +64,7 @@ struct BenchConfig {
     std::string reorder_mode = "bfs"; // bfs | hierarchical
     size_t bfs_budget = 128;
     int proximity_prefix = 16;
+    int runs = 1;
     std::vector<int> sweep_prefix;
     std::string data_dir = "Datasets/sift1M";
     std::vector<int> ef_list = {16, 32, 64};
@@ -154,6 +155,8 @@ BenchConfig parse_args(int argc, char** argv) {
             cfg.bfs_budget = std::stoull(next_val(arg));
         } else if (arg == "--proximity_prefix") {
             cfg.proximity_prefix = std::stoi(next_val(arg));
+        } else if (arg == "--runs") {
+            cfg.runs = std::max(1, std::stoi(next_val(arg)));
         } else if (arg == "--sweep_prefix") {
             cfg.sweep_prefix = parse_int_list(next_val(arg));
             cfg.ab_validate = true;
@@ -389,11 +392,22 @@ GraphMemBreakdown measure_graph_memory(const faiss::IndexACORN& index) {
     return m;
 }
 
+static int g_bench_runs = 1;
+
+static double student_t_975(int df) {
+    static const double tbl[] = {
+            1.96, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228};
+    if (df <= 0) return 0.0;
+    if (df <= 10) return tbl[df];
+    return 1.96;
+}
+
 struct SearchRunResult {
     int efs = 0;
     double recall = 0.0;
     double mean_ms = 0.0;
     double p50_ms = 0.0;
+    double p50_ci95_ms = 0.0;
     double p95_ms = 0.0;
     double p99_ms = 0.0;
     double qps_1t = 0.0;
@@ -457,40 +471,65 @@ std::vector<SearchRunResult> run_search_suite(
             }
         }
 
-        faiss::acorn_stats.reset();
-        auto t_all0 = std::chrono::high_resolution_clock::now();
-        for (size_t q = 0; q < nq; ++q) {
-            auto tq0 = std::chrono::high_resolution_clock::now();
-            if (is_filtered) {
-                index.search(
-                        1,
-                        xq + q * d_base,
-                        k,
-                        D.data() + q * k,
-                        I.data() + q * k,
-                        active_filter_map.data(),
-                        &params);
-            } else {
-                index.search(1, xq + q * d_base, k, D.data() + q * k, I.data() + q * k, &params);
-            }
-            auto tq1 = std::chrono::high_resolution_clock::now();
-            lat_ms[q] = std::chrono::duration<double, std::milli>(tq1 - tq0).count();
-        }
-        auto t_all1 = std::chrono::high_resolution_clock::now();
+        const int num_runs = std::max(1, g_bench_runs);
+        std::vector<double> run_p50(num_runs), run_mean(num_runs), run_p95(num_runs),
+                run_p99(num_runs), run_qps(num_runs);
 
         SearchRunResult r;
         r.efs = efs;
-        double total_s = std::chrono::duration<double>(t_all1 - t_all0).count();
-        r.recall = compute_recall_at_k(I.data(), gt, nq, static_cast<size_t>(k), gt_stride);
-        r.mean_ms = std::accumulate(lat_ms.begin(), lat_ms.end(), 0.0) / static_cast<double>(nq);
-        r.p50_ms = percentile(lat_ms, 50.0);
-        r.p95_ms = percentile(lat_ms, 95.0);
-        r.p99_ms = percentile(lat_ms, 99.0);
-        r.qps_1t = static_cast<double>(nq) / total_s;
-        r.avg_ndis = static_cast<double>(faiss::acorn_stats.n3) / static_cast<double>(nq);
-        r.avg_decode_calls = static_cast<double>(faiss::acorn_stats.decode_calls) / static_cast<double>(nq);
-        r.avg_decoded_edges = static_cast<double>(faiss::acorn_stats.decoded_edges) / static_cast<double>(nq);
-        r.avg_decode_us = faiss::acorn_stats.decode_time_us / static_cast<double>(nq);
+        for (int ri = 0; ri < num_runs; ++ri) {
+            faiss::acorn_stats.reset();
+            auto t_all0 = std::chrono::high_resolution_clock::now();
+            for (size_t q = 0; q < nq; ++q) {
+                auto tq0 = std::chrono::high_resolution_clock::now();
+                if (is_filtered) {
+                    index.search(
+                            1,
+                            xq + q * d_base,
+                            k,
+                            D.data() + q * k,
+                            I.data() + q * k,
+                            active_filter_map.data(),
+                            &params);
+                } else {
+                    index.search(1, xq + q * d_base, k, D.data() + q * k, I.data() + q * k, &params);
+                }
+                auto tq1 = std::chrono::high_resolution_clock::now();
+                lat_ms[q] = std::chrono::duration<double, std::milli>(tq1 - tq0).count();
+            }
+            auto t_all1 = std::chrono::high_resolution_clock::now();
+            double total_s = std::chrono::duration<double>(t_all1 - t_all0).count();
+            run_mean[ri] = std::accumulate(lat_ms.begin(), lat_ms.end(), 0.0) / static_cast<double>(nq);
+            run_p50[ri] = percentile(lat_ms, 50.0);
+            run_p95[ri] = percentile(lat_ms, 95.0);
+            run_p99[ri] = percentile(lat_ms, 99.0);
+            run_qps[ri] = static_cast<double>(nq) / total_s;
+            if (ri == 0) {
+                r.recall = compute_recall_at_k(I.data(), gt, nq, static_cast<size_t>(k), gt_stride);
+                r.avg_ndis = static_cast<double>(faiss::acorn_stats.n3) / static_cast<double>(nq);
+                r.avg_decode_calls = static_cast<double>(faiss::acorn_stats.decode_calls) / static_cast<double>(nq);
+                r.avg_decoded_edges = static_cast<double>(faiss::acorn_stats.decoded_edges) / static_cast<double>(nq);
+                r.avg_decode_us = faiss::acorn_stats.decode_time_us / static_cast<double>(nq);
+            }
+        }
+
+        auto vec_median = [](std::vector<double> v) -> double {
+            std::sort(v.begin(), v.end());
+            size_t m = v.size();
+            return (m % 2 == 1) ? v[m / 2] : 0.5 * (v[m / 2 - 1] + v[m / 2]);
+        };
+        r.mean_ms = vec_median(run_mean);
+        r.p50_ms = vec_median(run_p50);
+        r.p95_ms = vec_median(run_p95);
+        r.p99_ms = vec_median(run_p99);
+        r.qps_1t = vec_median(run_qps);
+        if (num_runs > 1) {
+            double avg = std::accumulate(run_p50.begin(), run_p50.end(), 0.0) / num_runs;
+            double var = 0.0;
+            for (double x : run_p50) var += (x - avg) * (x - avg);
+            double sd = std::sqrt(var / static_cast<double>(num_runs - 1));
+            r.p50_ci95_ms = student_t_975(num_runs - 1) * sd / std::sqrt(static_cast<double>(num_runs));
+        }
         results.push_back(r);
 
         if (profile_decode) {
@@ -510,8 +549,11 @@ std::vector<SearchRunResult> run_search_suite(
             std::cout << "| " << r.efs
                       << " | " << std::fixed << std::setprecision(4) << r.recall
                       << " | " << std::setprecision(3) << r.mean_ms
-                      << " | " << std::setprecision(3) << r.p50_ms
-                      << " | " << std::setprecision(3) << r.p95_ms
+                      << " | " << std::setprecision(3) << r.p50_ms;
+            if (g_bench_runs > 1) {
+                std::cout << " +/- " << std::setprecision(3) << r.p50_ci95_ms;
+            }
+            std::cout << " | " << std::setprecision(3) << r.p95_ms
                       << " | " << std::setprecision(3) << r.p99_ms
                       << " | " << std::setprecision(1) << r.qps_1t
                       << " | " << std::setprecision(1) << r.avg_ndis
@@ -857,6 +899,7 @@ void analyze_level0_deltas(const faiss::IndexACORN& index, const char* label) {
 int main(int argc, char** argv) try {
     std::cout << std::unitbuf;
     BenchConfig cfg = parse_args(argc, argv);
+    g_bench_runs = cfg.runs;
 
     if (cfg.threads > 0) {
         omp_set_num_threads(cfg.threads);
@@ -871,6 +914,7 @@ int main(int argc, char** argv) try {
               << ", M_beta=" << cfg.M_beta
               << ", k=" << cfg.k
               << ", selectivity=" << cfg.selectivity
+              << ", runs=" << cfg.runs
               << ", omp_threads=" << active_threads << "\n";
 
     // 1. Load SIFT1M base and query vectors
@@ -1450,11 +1494,15 @@ int main(int argc, char** argv) try {
                               << " | " << std::setprecision(4) << res_vanilla[i].recall
                               << " | " << std::setprecision(4) << res_ef[i].recall
                               << " | " << std::setprecision(4) << res_bp[i].recall
-                              << " | " << std::setprecision(3) << res_vanilla[i].p50_ms << " ms"
-                              << " | " << std::setprecision(3) << res_vbyte[i].p50_ms << " ms"
-                              << " | " << std::setprecision(3) << res_ef[i].p50_ms << " ms"
-                              << " | " << std::setprecision(3) << res_bp[i].p50_ms << " ms"
-                              << " | " << std::showpos << std::setprecision(1) << ovh_van << "%"
+                              << " | " << std::setprecision(3) << res_vanilla[i].p50_ms;
+                    if (g_bench_runs > 1) std::cout << " +/- " << res_vanilla[i].p50_ci95_ms;
+                    std::cout << " ms | " << std::setprecision(3) << res_vbyte[i].p50_ms;
+                    if (g_bench_runs > 1) std::cout << " +/- " << res_vbyte[i].p50_ci95_ms;
+                    std::cout << " ms | " << std::setprecision(3) << res_ef[i].p50_ms;
+                    if (g_bench_runs > 1) std::cout << " +/- " << res_ef[i].p50_ci95_ms;
+                    std::cout << " ms | " << std::setprecision(3) << res_bp[i].p50_ms;
+                    if (g_bench_runs > 1) std::cout << " +/- " << res_bp[i].p50_ci95_ms;
+                    std::cout << " ms | " << std::showpos << std::setprecision(1) << ovh_van << "%"
                               << " | " << std::setprecision(1) << ovh_ef << "%" << std::noshowpos
                               << " |\n";
                 }

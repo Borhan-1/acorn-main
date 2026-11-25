@@ -18,7 +18,7 @@
 | **Phase 3.5** | Real Correlated / Compound `AND` / Zipfian Predicates, 6-Selectivity Crossover, `P` Sweep, `DBpedia-OpenAI` (`1,536-d`) | 8 GiB Laptop | ✅ **Completed** |
 | **Phase 4** | 6 Camera-Ready Figures (PNG+PDF), Formal Proofs (Props 1–4), LaTeX Tables, Full Manuscript (`Rev 1–4`) | 8 GiB Laptop | ✅ **Completed** |
 | **Step A** | Live GitHub Repo Sync, Section 7 URL Fix, Peak Permutation RAM Clarification, Fixed-Point README Table | 8 GiB Laptop | ✅ **Completed** |
-| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅ Done); `B.2` 5-Run 95% CI, `B.3` Memory–Latency Pareto, `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (1/5)** |
+| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅ Done), `B.2` 5-Run 95% CI (✅ Done); `B.3` Memory–Latency Pareto, `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (2/5)** |
 | **Track C** | **Large-Scale Server Validation:** `10M` & `100M` Datasets, Exact Server Ground Truth, `4–64` Thread Scaling | 128 GiB+ Linux Server | ⏳ **Planned** |
 | **Track D** | **Submission & Dissemination:** Journal LaTeX Template, arXiv Preprint, Zenodo DOI, Journal Submission | Any | ⏳ **Planned** |
 
@@ -83,9 +83,13 @@ These upgrades directly neutralize the top reviewer objections **without needing
   - **Implemented:** `faiss/impl/codec/elias_fano_codec.h` (Base-Separated Elias-Fano + 64-bit `ctzll` decoder), `tests/test_elias_fano.cpp` (`3,275` exhaustive cases + `16` two-segment splits passed; `5.89×` slower decode than AVX2 SIMD-BP128 at `19.94` vs. `3.38 ns/edge`), wired into `ACORN.h`, `IndexACORN.h/.cpp`, and `bench_acorn_sift1m.cpp` (`--codec all`).
   - **Measured 4-Way Results (`σ=1%`):** Across `SIFT1M` (`126.80` vs. `130.66 MiB`), `GloVe-400K` (`45.82` vs. `46.90 MiB`), and `DBpedia-OpenAI` (`11.58` vs. `11.94 MiB`), Elias-Fano saves only `0.6–0.9%` more graph RAM while running **`15.8%–25.3%` slower** than AVX2 SIMD-BP128 across every dataset and `efSearch` setting (`ef=128` `p50`: `5.040 → 4.066 ms`, `4.590 → 3.429 ms`, `4.209 → 3.319 ms`).
   - **Manuscript Updated:** Added to Section 5.1, Section 5.3 (4-way comparison table), and Reference `[25]` (Ottaviano & Venturini, SIGIR 2014).
-- [ ] **B.2 — Multi-Run Statistical Variance & 95% Confidence Intervals (`--runs 5`):**
-  - **Why:** Single-run `-1.3%` / `-2.0%` latency differences can be dismissed as noise; 5-run median + 95% CI makes latency claims statistically airtight.
-  - **Scope:** Add `--runs <K>` (default `5`) loop to query evaluation in `demos/bench_acorn_sift1m.cpp`, report `median ± 95% CI` (and paired Wilcoxon/t-test significance), and update `tables.tex`, `MANUSCRIPT_DRAFT.md`, and `README.md`.
+- [x] **B.2 — Multi-Run Statistical Variance & 95% Confidence Intervals (`✅ Completed`):**
+  - **Implemented:** Added `--runs <K>` with exact Student-$t$ 95% CI ($t_{0.975, 4} = 2.776$ for 5 runs) to `demos/bench_acorn_sift1m.cpp`.
+  - **Measured 5-Run Results (`--runs 5 --codec all`, `σ=1%, ef=128`):**
+    - `SIFT1M`: Vanilla `4.177 ± 0.047 ms` vs. VByte `6.054 ± 0.036 ms` vs. Elias-Fano `4.982 ± 0.040 ms` vs. **SIMD-BP128 `4.052 ± 0.054 ms`** (`-3.0%` vs. Van, `-18.7%` vs. EF).
+    - `GloVe-400K`: Vanilla `3.257 ± 0.044 ms` vs. VByte `5.065 ± 0.102 ms` vs. Elias-Fano `4.521 ± 0.040 ms` vs. **SIMD-BP128 `3.460 ± 0.023 ms`** (`-23.5%` vs. EF, `-31.7%` vs. VByte).
+    - `DBpedia-OpenAI`: Vanilla `3.427 ± 0.095 ms` vs. VByte `4.253 ± 0.133 ms` vs. Elias-Fano `4.354 ± 0.016 ms` vs. **SIMD-BP128 `3.311 ± 0.035 ms`** (`-3.4%` vs. Van, `-23.9%` vs. EF).
+  - **Docs Updated:** `MANUSCRIPT_DRAFT.md` (Sec 5.1 & 5.3) and `README.md` Headline Results table updated with 5-run 95% CIs.
 - [ ] **B.3 — Dedicated Memory vs. Latency Pareto Frontier Plot:**
   - **Why:** Visually demonstrates the exact space–time dominance of `AVX2 SIMD-BP128` over `Vanilla ACORN`, `Standard HNSW`, `Scalar VByte`, and `Elias-Fano` at a fixed recall target.
   - **Scope:** Add `fig7_memory_latency_pareto.(png|pdf)` to `benchs/generate_thesis_plots.py` and embed in Section 5.
