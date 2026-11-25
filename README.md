@@ -8,12 +8,14 @@ Built on top of [`stanford-futuredata/ACORN`](https://github.com/stanford-future
 
 ## Key Contributions & Headline Results
 
-| Dataset ($N, d$) | Vanilla ACORN Graph | Standard HNSW ($M=32$) | **Ours (AVX2 SIMD-BP128)** | Savings vs. ACORN / HNSW | Median Filtered Latency (`p50`) |
-| :--- | ---: | ---: | ---: | :---: | :--- |
-| **SIFT1M** (`1M × 128-d`, `ACORN-1`) | `442.63 MiB` | `259.52 MiB` | **`130.46 MiB`** (`2.20 B/edge`) | **`-70.5%` / `-49.7%`** | **`-11.1%` to `-44.3%`** (`σ=1%`); `+21.4%` 4T QPS |
-| **GloVe-400K** (`399K × 100-d`, NLP) | `176.61 MiB` | `103.55 MiB` | **`46.92 MiB`** (`1.99 B/edge`) | **`-73.4%` / `-54.7%`** | **`-26.2%` to `-46.7%`** @ `ef=32`; matches R@10 on real range/Zipf |
-| **DBpedia-OpenAI** (`100K × 1,536-d`, LLM) | `44.27 MiB` | `25.96 MiB` | **`11.92 MiB`** (`1.72 B/edge`) | **`-73.1%` / `-54.1%`** | **`-2.0%` to `-35.0%`** (`σ=1%`); `4.4×–7.0×` faster than Pre-Filter (`σ=10%`) |
-| **SIFT100K Dense** (`γ=12`, `77%` full) | `48.68 MiB` | `25.96 MiB` | **`20.85 MiB`** (`1.50 B/edge`) | **`-57.2%` / `-19.7%`** | **`-1.3%` to `-32.0%`** faster than Vanilla `ACORN-γ` |
+| Dataset ($N, d$) | Vanilla ACORN | Standard HNSW ($M=32$) | **Ours (AVX2 SIMD-BP128)** | Savings vs. ACORN / HNSW | Fixed Point (`σ`, `ef`) | `p50` vs. Vanilla & Recall@10 |
+| :--- | ---: | ---: | ---: | :---: | :---: | :--- |
+| **SIFT1M** (`1M × 128-d`, `ACORN-1`) | `442.63 MiB` | `259.52 MiB` | **`130.46 MiB`** (`2.20 B/edge`) | **`-70.5%` / `-49.7%`** | `σ=1%`, `ef=128` (`ef=32`) | **`-11.1%`** (`4.277 → 3.804 ms`; `ef=32`: **`-29.5%`**), R@10 `0.9755` vs. `0.9757` |
+| **GloVe-400K** (`399K × 100-d`, NLP) | `176.61 MiB` | `103.55 MiB` | **`46.92 MiB`** (`1.99 B/edge`) | **`-73.4%` / `-54.7%`** | `σ=1%`, `ef=128` (`ef=32`) | **`+2.3%`** parity (`3.469 → 3.549 ms`; `ef=32`: **`-46.7%`**), R@10 `0.8952` vs. `0.8953` |
+| **DBpedia-OpenAI** (`100K × 1,536-d`, LLM) | `44.27 MiB` | `25.96 MiB` | **`11.92 MiB`** (`1.72 B/edge`) | **`-73.1%` / `-54.1%`** | `σ=1%`, `ef=128` (`ef=32`) | **`-2.0%`** parity (`4.236 → 4.149 ms`; `ef=32`: **`-35.0%`**), R@10 `0.9783` vs. `0.9789` |
+| **SIFT100K Dense** (`100K × 128-d`, `ACORN-γ`) | `48.68 MiB` | `25.96 MiB` | **`20.85 MiB`** (`1.50 B/edge`) | **`-57.2%` / `-19.7%`** | `σ=5%`, `ef=64` (`ef=32`) | **`-1.3%`** parity (`0.851 → 0.839 ms`; `ef=32`: **`-24.7%`**), R@10 `0.9958` vs. `0.9968` |
+
+> *Single sequential runs on identical built graphs (4-thread AVX2 workstation; latency deltas within `±3%` represent practical parity). At `1M SIFT1M` (`σ=10%, ef=128`), 4-thread throughput improves by **`+21.4%`** (`297.2 → 360.8 QPS`).*
 
 - **Hierarchical Reordering:** Bounds transient BFS queue workspace to $O(N/M + B_{\text{loc}})$ — **`32.0×` smaller peak queue** (`3,906 KiB → 122.1 KiB`) and **`1.93×` faster** than flat BFS on `1M SIFT1M`.
 - **AVX2 Codec (`SimdBP128Codec`):** Decodes into stack memory at **`1.58 ns/edge`** (`633M edges/s`, **`5.02×` faster** than scalar `VByte`) with zero heap allocations and a bit-compatible scalar fallback.

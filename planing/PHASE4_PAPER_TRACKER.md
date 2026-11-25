@@ -57,3 +57,12 @@ Generated via [benchs/generate_thesis_plots.py](../benchs/generate_thesis_plots.
 | **Rev 2** | Formalize Proofs in Sec 4 & `THEORETICAL_ANALYSIS.md` (explicit Chernoff tail bound in Prop. 2, explicit i.i.d./correlation $\kappa$ & capture-probability proof in Prop. 3) | ✅ **Done** |
 | **Rev 3** | Polish Sec 3 & Sec 5 tone (remove `!`, `"critical reviewer question"`, excessive bolding, add explicit note on single-run variance & CI protocol) | ✅ **Done** |
 | **Rev 4** | Polish Sec 6 & Sec 7, add mandatory **Reproducibility & Artifact Availability** section, remove uncited Ref `[25]` (`LAION-5B`) & verify 1-to-1 citations | ✅ **Done** |
+
+---
+
+## Step A — Pre-Submission Polish (Tracked Sub-Parts)
+| Sub-Part | Scope | Status |
+|---|---|---|
+| **Step A.1** | Replace `<author>` placeholder in `MANUSCRIPT_DRAFT.md` Sec 7 with `https://github.com/Borhan-1/acorn-main` & explicitly clarify BFS queue workspace $O(N/M + B_{\text{loc}})$ vs. out-of-place `new_codes` permutation RAM in Sec 4.2 & Sec 6.4 | ✅ **Done** |
+| **Step A.2** | Clean `README.md` Headline Results table to show fixed, unambiguous `(σ, efSearch)` operating points per row | ✅ **Done** |
+| **Step A.3** | Commit & push all Step A polish updates to `https://github.com/Borhan-1/acorn-main` (`origin main`) | ✅ **Done** |
