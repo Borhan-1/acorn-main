@@ -1,0 +1,180 @@
+% ============================================================================
+% Camera-Ready LaTeX Tables for SCI Q1 Submission (Elsevier / IEEE TKDE / VLDBJ)
+% Packages required in main preamble:
+%   \usepackage{booktabs}
+%   \usepackage{multirow}
+%   \usepackage{siunitx}
+%   \usepackage{graphicx}
+% ============================================================================
+
+% ----------------------------------------------------------------------------
+% Table 1: Datasets, Modalities, Predicate Workloads & Sub-Billion Scaling
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{Summary of Evaluated Embedding Datasets, Predicate Workloads, and Sub-Billion Analytical Scaling Targets.}
+\label{tab:datasets}
+\small
+\begin{tabular}{@{}llrrll@{}}
+\toprule
+\textbf{Dataset} & \textbf{Domain / Embedding Model} & \textbf{Vectors ($N$)} & \textbf{Dim ($d$)} & \textbf{Metric} & \textbf{Evaluated Predicate Workloads ($\sigma$)} \\
+\midrule
+\textbf{SIFT1M} & Computer Vision (SIFT Descriptors) & $1{,}000{,}000$ & $128$ & Euclidean ($L_2$) & Uniform Categorical ($\sigma \in \{0.1\%, 1\%, 5\%, 10\%, 20\%, 100\%\}$) \\
+\textbf{GloVe-400K} & NLP (Stanford GloVe-6B Tokens) & $399{,}001$ & $100$ & Angular / Cosine & Real Range ($\text{len}\ge 14,16$), Compound ($\text{len}\ge 10 \wedge \text{rank}<20\text{k}$), Zipf ($\alpha=1.1$) \\
+\textbf{DBpedia-OpenAI} & LLM RAG (\texttt{text-embedding-ada-002}) & $100{,}000$ & $1{,}536$ & Angular / Cosine & Uniform ($\sigma \in \{1\%, 10\%\}$), Real Entity Length Range ($\text{text\_len}\ge 500$) \\
+\midrule
+\textbf{SIFT1B-100M--500M} & Sub-Billion Analytical Scaling Model & $10^8 \text{--} 5\times 10^8$ & $128$ & Euclidean ($L_2$) & Projected RAM Envelope from Verified Linear Bytes/Edge Constants \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ----------------------------------------------------------------------------
+% Table 2: Graph Memory Footprint, Bytes/Edge, and Real OS Process RSS
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{Graph Index Memory Footprint, Compression Ratio, Payload Density, and Measured Windows OS Process RSS ($M=32, M_\beta=64$). Our AVX2 SIMD-BP128 index is \textbf{70.5\%--73.4\% smaller than Vanilla ACORN} and \textbf{49.7\%--54.7\% smaller than standard uncompressed HNSW}.}
+\label{tab:memory}
+\small
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+\textbf{Dataset ($N, d$)} & \textbf{Index Configuration} & \textbf{Graph MB} & \textbf{vs.\ Vanilla} & \textbf{vs.\ HNSW} & \textbf{B / Active Edge} & \textbf{OS RSS (MB)} & \textbf{Compress Time} \\
+\midrule
+\multirow{4}{*}{\textbf{SIFT1M} ($1\text{M}, 128\text{-d}, \gamma=1$)}
+ & Standard HNSW ($M=32$, Post-Filter) & $259.52$ & $-41.37\%$ & Baseline & $4.00\text{ B}$ & --- & --- \\
+ & Vanilla ACORN (Uncompressed) & $442.63$ & Baseline & $+70.56\%$ & $4.00\text{ B/slot}$ & $942.90$ & --- \\
+ & Option A: Hier.\ + Scalar VByte & $114.57$ & $-74.12\%$ & $-55.85\%$ & $1.82\text{ B}$ & $631.10$ & $2.86\text{ s}$ \\
+ & \textbf{Option B: Hier.\ + AVX2 SIMD-BP128 ($P=4$)} & $\mathbf{130.46}$ & $\mathbf{-70.53\%}$ & $\mathbf{-49.73\%}$ & $\mathbf{2.20\text{ B}}$ & $\mathbf{644.52}$ & $\mathbf{1.64\text{ s}}$ \\
+\midrule
+\multirow{4}{*}{\textbf{GloVe-400K} ($399\text{K}, 100\text{-d}, \gamma=1$)}
+ & Standard HNSW ($M=32$, Post-Filter) & $103.55$ & $-41.37\%$ & Baseline & $4.00\text{ B}$ & --- & --- \\
+ & Vanilla ACORN (Uncompressed) & $176.61$ & Baseline & $+70.56\%$ & $4.00\text{ B/slot}$ & $333.10$ & --- \\
+ & Option A: Hier.\ + Scalar VByte & $40.91$ & $-76.84\%$ & $-60.49\%$ & $1.68\text{ B}$ & $198.40$ & $0.68\text{ s}$ \\
+ & \textbf{Option B: Hier.\ + AVX2 SIMD-BP128 ($P=4$)} & $\mathbf{46.92}$ & $\mathbf{-73.43\%}$ & $\mathbf{-54.69\%}$ & $\mathbf{1.99\text{ B}}$ & $\mathbf{213.20}$ & $\mathbf{0.59\text{ s}}$ \\
+\midrule
+\multirow{4}{*}{\textbf{DBpedia-OpenAI} ($100\text{K}, 1536\text{-d}, \gamma=1$)}
+ & Standard HNSW ($M=32$, Post-Filter) & $25.96$ & $-41.36\%$ & Baseline & $4.00\text{ B}$ & --- & --- \\
+ & Vanilla ACORN (Uncompressed) & $44.27$ & Baseline & $+70.53\%$ & $4.00\text{ B/slot}$ & $644.01$ & --- \\
+ & Option A: Hier.\ + Scalar VByte & $9.43$ & $-78.71\%$ & $-63.67\%$ & $1.29\text{ B}$ & $610.30$ & $0.24\text{ s}$ \\
+ & \textbf{Option B: Hier.\ + AVX2 SIMD-BP128 ($P=8$)} & $\mathbf{11.92}$ & $\mathbf{-73.07\%}$ & $\mathbf{-54.08\%}$ & $\mathbf{1.72\text{ B}}$ & $\mathbf{612.83}$ & $\mathbf{0.28\text{ s}}$ \\
+\midrule
+\multirow{3}{*}{\textbf{SIFT100K Dense} ($\gamma=12, 77\%\text{ full}$)}
+ & Vanilla ACORN-$\gamma$ (Uncompressed) & $48.68$ & Baseline & $+87.52\%$ & $4.00\text{ B/slot}$ & $105.37$ & --- \\
+ & Option A: Hier.\ + Scalar VByte & $19.14$ & $-60.68\%$ & $-26.27\%$ & $1.38\text{ B}$ & $77.80$ & $0.44\text{ s}$ \\
+ & \textbf{Option B: Hier.\ + AVX2 SIMD-BP128 ($M_\beta$)} & $\mathbf{20.85}$ & $\mathbf{-57.16\%}$ & $\mathbf{-19.68\%}$ & $\mathbf{1.50\text{ B}}$ & $\mathbf{79.52}$ & $\mathbf{0.38\text{ s}}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ----------------------------------------------------------------------------
+% Table 3: Main 3-Domain End-to-End Filtered Search Comparison (sel = 0.01 & 0.10)
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{End-to-End Filtered Search Performance Across Three Domains ($\text{efSearch} \in \{32, 64, 128\}$, $k=10$, $1{,}000$ queries). Post-Filter HNSW suffers catastrophic recall collapse at $\sigma=1\%$, Scalar VByte incurs $+25\%$ to $+49\%$ latency penalties at $\text{ef}=128$, while \textbf{Ours (AVX2 SIMD-BP128)} matches Vanilla recall and improves median latency.}
+\label{tab:multidomain}
+\small
+\begin{tabular}{@{}llccccccr@{}}
+\toprule
+\textbf{Dataset \& Filter} & \textbf{Method} & \textbf{Graph MB} & \textbf{R@10 (32)} & \textbf{R@10 (64)} & \textbf{R@10 (128)} & \textbf{p50 (32)} & \textbf{p50 (128)} & \textbf{p50 $\Delta$ (128)} \\
+\midrule
+\multirow{5}{*}{\shortstack[l]{\textbf{SIFT1M} ($1\text{M}, 128\text{-d}$)\\Strict $\sigma = 1.0\%$}}
+ & Pre-Filter Exact $L_2$ (Bitmap) & $0.00$ & $1.0000$ & $1.0000$ & $1.0000$ & $3.404\text{ ms}$ & $3.404\text{ ms}$ & --- \\
+ & Post-Filter HNSW ($M=32$) & $259.52$ & $0.0332$ & $0.0655$ & $0.1290$ & $0.580\text{ ms}$ & $1.120\text{ ms}$ & Collapse \\
+ & Vanilla ACORN & $442.63$ & $0.8877$ & $0.9467$ & $0.9757$ & $1.982\text{ ms}$ & $4.277\text{ ms}$ & Baseline \\
+ & Option A: Scalar VByte & $110.19$ & $0.8873$ & $0.9464$ & $0.9756$ & $1.847\text{ ms}$ & $5.793\text{ ms}$ & $+35.4\%$ \\
+ & \textbf{Ours: AVX2 SIMD-BP128} & $\mathbf{128.20}$ & $\mathbf{0.8876}$ & $\mathbf{0.9465}$ & $\mathbf{0.9755}$ & $\mathbf{1.397\text{ ms}}$ & $\mathbf{3.804\text{ ms}}$ & $\mathbf{-11.1\%}$ \\
+\midrule
+\multirow{5}{*}{\shortstack[l]{\textbf{GloVe-400K} ($399\text{K}, 100\text{-d}$)\\Strict $\sigma = 1.0\%$}}
+ & Pre-Filter Exact $L_2$ (Bitmap) & $0.00$ & $1.0000$ & $1.0000$ & $1.0000$ & $0.910\text{ ms}$ & $0.910\text{ ms}$ & --- \\
+ & Post-Filter HNSW ($M=32$) & $103.55$ & $0.0316$ & $0.0603$ & $0.1291$ & $1.310\text{ ms}$ & $1.790\text{ ms}$ & Collapse \\
+ & Vanilla ACORN & $176.61$ & $0.7268$ & $0.8219$ & $0.8953$ & $2.164\text{ ms}$ & $3.469\text{ ms}$ & Baseline \\
+ & Option A: Scalar VByte & $40.93$ & $0.7244$ & $0.8206$ & $0.8944$ & $1.710\text{ ms}$ & $5.155\text{ ms}$ & $+48.6\%$ \\
+ & \textbf{Ours: AVX2 SIMD-BP128} & $\mathbf{47.70}$ & $\mathbf{0.7328}$ & $\mathbf{0.8254}$ & $\mathbf{0.8952}$ & $\mathbf{1.155\text{ ms}}$ & $\mathbf{3.549\text{ ms}}$ & $\mathbf{+2.3\%}$ (\textbf{$-46.7\%$} @ 32) \\
+\midrule
+\multirow{5}{*}{\shortstack[l]{\textbf{DBpedia-OpenAI} ($100\text{K}, 1536\text{-d}$)\\Strict $\sigma = 1.0\%$}}
+ & Pre-Filter Exact $L_2$ (Bitmap) & $0.00$ & $1.0000$ & $1.0000$ & $1.0000$ & $1.750\text{ ms}$ & $1.750\text{ ms}$ & --- \\
+ & Post-Filter HNSW ($M=32$) & $25.96$ & $0.0337$ & $0.0640$ & $0.1237$ & $3.126\text{ ms}$ & $4.929\text{ ms}$ & Collapse \\
+ & Vanilla ACORN & $44.27$ & $0.8134$ & $0.9286$ & $0.9789$ & $2.154\text{ ms}$ & $4.236\text{ ms}$ & Baseline \\
+ & Option A: Scalar VByte & $9.43$ & $0.6781$ & $0.9045$ & $0.9779$ & $1.606\text{ ms}$ & $5.296\text{ ms}$ & $+25.0\%$ \\
+ & \textbf{Ours: AVX2 SIMD-BP128} & $\mathbf{11.92}$ & $\mathbf{0.8401}$ & $\mathbf{0.9388}$ & $\mathbf{0.9783}$ & $\mathbf{1.400\text{ ms}}$ & $\mathbf{4.149\text{ ms}}$ & $\mathbf{-2.0\%}$ (\textbf{$-35.0\%$} @ 32) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ----------------------------------------------------------------------------
+% Table 4: Complete 1M SIFT1M 6-Selectivity Matrix & Regime Crossover
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{Complete 6-Selectivity Hybrid Search Regime Matrix on Full $1{,}000{,}000$-Vector \textbf{SIFT1M} ($\text{efSearch}=128$). Beyond $\sigma \ge 1\%$, Exact Pre-Filter slows down up to $9.5\times$, whereas \textbf{Ours} beats both Vanilla ACORN and VByte across $\sigma \in [1\%, 100\%]$.}
+\label{tab:selectivity}
+\small
+\begin{tabular}{@{}rrrrccccrr@{}}
+\toprule
+\textbf{Selectivity $\sigma$} & \textbf{Passing} & \textbf{Pre-Bmp p50} & \textbf{Pre-Inv p50} & \textbf{Van R@10} & \textbf{Ours R@10} & \textbf{Van p50} & \textbf{VByte p50} & \textbf{Ours p50} & \textbf{Ours vs.\ Van} \\
+\midrule
+$0.1\%$ ($0.001$) & $994$ & $\mathbf{0.962\text{ ms}}$ & $\mathbf{0.115\text{ ms}}$ & $0.3706$ & $0.3706$ & $3.884\text{ ms}$ & $6.961\text{ ms}$ & $4.117\text{ ms}$ & $+6.0\%$ ($-40.9\%$ vs VB) \\
+$1.0\%$ ($0.010$) & $9{,}941$ & $3.404\text{ ms}$ & $3.660\text{ ms}$ & $0.9757$ & $\mathbf{0.9755}$ & $4.277\text{ ms}$ & $5.793\text{ ms}$ & $\mathbf{3.804\text{ ms}}$ & $\mathbf{-11.1\%}$ ($-34.3\%$ vs VB) \\
+$5.0\%$ ($0.050$) & $49{,}836$ & $13.230\text{ ms}$ & $11.377\text{ ms}$ & $0.9899$ & $\mathbf{0.9887}$ & $5.485\text{ ms}$ & $7.745\text{ ms}$ & $\mathbf{5.412\text{ ms}}$ & $\mathbf{-1.3\%}$ ($-30.1\%$ vs VB) \\
+$10.0\%$ ($0.100$) & $100{,}099$ & $21.580\text{ ms}$ & $22.004\text{ ms}$ & $0.9844$ & $\mathbf{0.9802}$ & $4.403\text{ ms}$ & $5.603\text{ ms}$ & $\mathbf{4.279\text{ ms}}$ & $\mathbf{-2.8\%}$ ($-23.6\%$ vs VB) \\
+$20.0\%$ ($0.200$) & $199{,}641$ & $38.651\text{ ms}$ & $37.453\text{ ms}$ & $0.9564$ & $\mathbf{0.9513}$ & $4.421\text{ ms}$ & $5.792\text{ ms}$ & $\mathbf{4.134\text{ ms}}$ & $\mathbf{-6.5\%}$ ($-28.6\%$ vs VB) \\
+$100\%$ (Unfilt.) & $1{,}000{,}000$ & --- & --- & $0.9566$ & $\mathbf{0.9561}$ & $1.676\text{ ms}$ & $1.637\text{ ms}$ & $\mathbf{1.635\text{ ms}}$ & $\mathbf{-2.4\%}$ ($-0.1\%$ vs VB) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ----------------------------------------------------------------------------
+% Table 5: Real-World Correlated Range, Multi-Attribute Compound & Zipfian Skew
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{Evaluation Under Real Correlated Range, Multi-Attribute Compound (\texttt{AND}), and Power-Law Zipfian Skewed Predicates on \textbf{GloVe-400K} ($46.9\text{--}47.7\text{ MB}$, $-73\%$) and \textbf{DBpedia-OpenAI} ($11.9\text{ MB}$, $-73\%$) at $\text{efSearch}=128$.}
+\label{tab:real_predicates}
+\small
+\begin{tabular}{@{}llrrccrrr@{}}
+\toprule
+\textbf{Dataset} & \textbf{Predicate Expression} & \textbf{Sel.\ \%} & \textbf{HNSW R@10} & \textbf{Van R@10} & \textbf{Ours R@10} & \textbf{Van p50} & \textbf{VByte p50} & \textbf{Ours p50 (vs.\ VB)} \\
+\midrule
+\multirow{5}{*}{\textbf{GloVe-400K}}
+ & $P_1$: $\texttt{word\_len} \ge 16$ (Correlated Range) & $1.10\%$ & $0.1391$ & $0.8712$ & $\mathbf{0.8736}$ & $3.512\text{ ms}$ & $4.934\text{ ms}$ & $\mathbf{3.434\text{ ms}}$ ($-30.4\%$) \\
+ & $P_2$: $\texttt{word\_len} \ge 14$ (Correlated Range) & $2.87\%$ & $0.2918$ & $0.9089$ & $\mathbf{0.9062}$ & $3.385\text{ ms}$ & $5.044\text{ ms}$ & $\mathbf{3.549\text{ ms}}$ ($-29.6\%$) \\
+ & $P_3$: $\texttt{len}\ge 10 \wedge \texttt{rank}<20\text{k}$ (Compound) & $0.75\%$ & $0.0592$ & $0.9292$ & $\mathbf{0.9295}$ & $3.077\text{ ms}$ & $3.897\text{ ms}$ & $\mathbf{3.075\text{ ms}}$ ($-21.1\%$) \\
+ & $P_4$: Zipfian Rare Tail ($b=49, \alpha=1.1$) & $0.36\%$ & $0.0477$ & $0.8036$ & $\mathbf{0.8048}$ & $3.088\text{ ms}$ & $4.853\text{ ms}$ & $\mathbf{3.236\text{ ms}}$ ($-33.3\%$) \\
+ & $P_5$: Zipfian Heavy Head ($b=0, \alpha=1.1, P=4$) & $23.41\%$ & $0.9169$ & $0.8750$ & $\mathbf{0.8717}$ & $3.253\text{ ms}$ & $3.963\text{ ms}$ & $\mathbf{3.510\text{ ms}}$ ($-54.4\%$ @ 32) \\
+\midrule
+\textbf{DBpedia-1536d} & $\texttt{entity\_text\_len} \ge 500$ (Range) & $0.98\%$ & --- & $0.7068$ & $\mathbf{0.7065}$ & $4.348\text{ ms}$ & $6.149\text{ ms}$ & $\mathbf{4.374\text{ ms}}$ ($-28.9\%$) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ----------------------------------------------------------------------------
+% Table 6: Component Ablations, Multi-Thread QPS, and Dynamic Insertion (1M SIFT1M)
+% ----------------------------------------------------------------------------
+\begin{table*}[t]
+\centering
+\caption{Ablation Studies \& Systems Evaluation on Full $1\text{M}$ \textbf{SIFT1M} ($\sigma=10\%$, $\text{efSearch}=128$): (A) Reordering Ablation, (B) Multi-Thread OpenMP QPS Scaling, and (C) Live $+50{,}000$ Dynamic Insertions ($1{,}897.8\text{ inserts/s}$, $75.36\%$ local cluster hits) with Fast Re-Compaction.}
+\label{tab:ablations}
+\small
+\begin{tabular}{@{}llrrrrr@{}}
+\toprule
+\textbf{Study Block} & \textbf{Configuration} & \textbf{Graph MB} & \textbf{Queue KB} & \textbf{R@10} & \textbf{p50 (ms)} & \textbf{Throughput / Key Metric} \\
+\midrule
+\multirow{4}{*}{\textbf{(A) Reordering Ablation}}
+ & Vanilla ACORN (Uncompressed) & $442.63$ & --- & $0.9853$ & $5.251$ & Baseline \\
+ & Compressed SIMD \emph{Without} Reordering & $133.59$ & $0.00$ & $0.9838$ & $5.895$ & $+12.3\%$ slower (VByte: $+47.0\%$) \\
+ & Flat BFS Reordering + AVX2 SIMD & $128.27$ & $3{,}906.25$ & $0.9808$ & $4.505$ & $-7.6\%$ faster, $2.59\text{ s}$ reorder \\
+ & \textbf{Hierarchical Reordering + AVX2 SIMD} & $\mathbf{132.52}$ & $\mathbf{122.09}$ & $\mathbf{0.9802}$ & $\mathbf{4.279}$ & $\mathbf{32.0\times}$ \textbf{smaller queue}, $\mathbf{1.34\text{ s}}$ \\
+\midrule
+\multirow{3}{*}{\textbf{(B) Multi-Thread QPS}}
+ & Vanilla ACORN ($1\text{T} / 2\text{T} / 4\text{T}$) & $442.63$ & --- & $0.9844$ & $4.403$ & $94.6 \;/\; 176.8 \;/\; 297.2\text{ QPS}$ \\
+ & Option A: Scalar VByte ($1\text{T} / 2\text{T} / 4\text{T}$) & $114.57$ & --- & $0.9733$ & $5.603$ & $81.7 \;/\; 223.5 \;/\; 305.0\text{ QPS}$ \\
+ & \textbf{Ours: AVX2 SIMD ($1\text{T} / 2\text{T} / 4\text{T}$)} & $\mathbf{132.52}$ & --- & $\mathbf{0.9802}$ & $\mathbf{4.279}$ & $\mathbf{169.1 \;/\; 241.4 \;/\; 360.8\text{ QPS}}$ ($\mathbf{+21.4\%}$) \\
+\midrule
+\multirow{3}{*}{\textbf{(C) Live Dynamic \texttt{add()}}}
+ & Initial $950\text{K}$ Compressed ($\rho=0.05$) & $127.03$ & $115.98$ & --- & --- & Pre-allocated $5\%$ BFS cluster gaps \\
+ & After $+50\text{K}$ Live Inserts (Overflow Active) & $166.93$ & --- & $0.9802$ & $7.230$ & $\mathbf{1{,}897.8\text{ ins/s}}$, $75.36\%$ local hits \\
+ & \textbf{After Fast \texttt{compact\_dynamic\_l0()}} & $\mathbf{134.01}$ & --- & $\mathbf{0.9800}$ & $\mathbf{4.980}$ & $\mathbf{-69.72\%}$ \textbf{RAM} in $\mathbf{1.953\text{ s}}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}

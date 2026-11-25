@@ -311,6 +311,8 @@ void IndexACORN::search(
         efSearch = params->efSearch;
     }
     size_t n1 = 0, n2 = 0, n3 = 0, ndis = 0, nreorder = 0;
+    size_t decode_calls = 0, decoded_edges = 0;
+    double decode_time_us = 0.0;
     double candidates_loop = 0, neighbors_loop = 0, tuple_unwrap = 0, skips = 0, visits = 0; //added for profiling
 
     idx_t check_period =
@@ -322,15 +324,28 @@ void IndexACORN::search(
 #pragma omp parallel
         {
             VisitedTable vt(ntotal);
+            std::vector<char> local_filter;
+            bool need_filter_remap =
+                    is_reordered && !(params && params->assume_reordered_filter);
+            if (need_filter_remap) {
+                local_filter.resize(ntotal);
+            }
 
             DistanceComputer* dis = storage_distance_computer(storage);
             ScopeDeleter1<DistanceComputer> del(dis);
 
-#pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder, candidates_loop)
+#pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder, candidates_loop, decode_calls, decoded_edges, decode_time_us)
             for (idx_t i = i0; i < i1; i++) {
                 idx_t* idxi = labels + i * k;
                 float* simi = distances + i * k;
                 char* filters = filter_id_map + i * ntotal;
+                if (need_filter_remap) {
+                    for (idx_t nid = 0; nid < ntotal; nid++) {
+                        storage_idx_t ext_id = new_to_old[nid];
+                        local_filter[nid] = (ext_id >= 0) ? filters[ext_id] : 0;
+                    }
+                    filters = local_filter.data();
+                }
                 dis->set_query(x + i * d);
 
                 maxheap_heapify(k, simi, idxi);
@@ -342,6 +357,9 @@ void IndexACORN::search(
                 n3 += stats.n3;
                 ndis += stats.ndis;
                 nreorder += stats.nreorder;
+                decode_calls += stats.decode_calls;
+                decoded_edges += stats.decoded_edges;
+                decode_time_us += stats.decode_time_us;
                 // printf("index -- stats updates: %f\n", stats.candidates_loop);
                 // printf("index -- stats updates: %f\n", stats.neighbors_loop);
                 //added for profiling
@@ -351,6 +369,13 @@ void IndexACORN::search(
                 skips += stats.skips;
                 visits += stats.visits;
                 maxheap_reorder(k, simi, idxi);
+                if (is_reordered) {
+                    for (idx_t j = 0; j < k; j++) {
+                        if (idxi[j] >= 0) {
+                            idxi[j] = new_to_old[idxi[j]];
+                        }
+                    }
+                }
                 
             }
         }
@@ -364,7 +389,7 @@ void IndexACORN::search(
         }
     }
 
-    acorn_stats.combine({n1, n2, n3, ndis, nreorder, candidates_loop, neighbors_loop, tuple_unwrap, skips, visits}); //added for profiling
+    acorn_stats.combine({n1, n2, n3, ndis, nreorder, candidates_loop, neighbors_loop, tuple_unwrap, skips, visits, decode_calls, decoded_edges, decode_time_us}); //added for profiling
 }
 
 // TODO figure out what do with this
@@ -388,6 +413,8 @@ void IndexACORN::search(
         efSearch = params->efSearch;
     }
     size_t n1 = 0, n2 = 0, n3 = 0, ndis = 0, nreorder = 0;
+    size_t decode_calls = 0, decoded_edges = 0;
+    double decode_time_us = 0.0;
     
     idx_t check_period =
             InterruptCallback::get_period_hint(acorn.max_level * d * efSearch);
@@ -402,7 +429,7 @@ void IndexACORN::search(
             DistanceComputer* dis = storage_distance_computer(storage);
             ScopeDeleter1<DistanceComputer> del(dis);
 
-#pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder)
+#pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder, decode_calls, decoded_edges, decode_time_us)
             for (idx_t i = i0; i < i1; i++) {
                 idx_t* idxi = labels + i * k;
                 float* simi = distances + i * k;
@@ -415,7 +442,17 @@ void IndexACORN::search(
                 n3 += stats.n3;
                 ndis += stats.ndis;
                 nreorder += stats.nreorder;
+                decode_calls += stats.decode_calls;
+                decoded_edges += stats.decoded_edges;
+                decode_time_us += stats.decode_time_us;
                 maxheap_reorder(k, simi, idxi);
+                if (is_reordered) {
+                    for (idx_t j = 0; j < k; j++) {
+                        if (idxi[j] >= 0) {
+                            idxi[j] = new_to_old[idxi[j]];
+                        }
+                    }
+                }
 
                 
             }
@@ -430,7 +467,7 @@ void IndexACORN::search(
         }
     }
 
-    acorn_stats.combine({n1, n2, n3, ndis, nreorder});
+    acorn_stats.combine({n1, n2, n3, ndis, nreorder, 0.0, 0.0, 0.0, 0.0, 0.0, decode_calls, decoded_edges, decode_time_us});
 }
 
 // add n vectors of dimension d to the index, x is the matrix of vectors TODO
@@ -450,10 +487,793 @@ void IndexACORN::reset() {
     acorn.reset();
     storage->reset();
     ntotal = 0;
+    is_reordered = false;
+    old_to_new.clear();
+    new_to_old.clear();
+    reordered_metadata.clear();
+    has_dynamic_gaps = false;
+    gap_cluster_stride = 0;
+    gap_occupied_per_cluster = 0;
+    dynamic_external_count = 0;
+    cluster_free_cursor.clear();
+    cluster_end_id.clear();
 }
 
 void IndexACORN::reconstruct(idx_t key, float* recons) const {
+    if (is_reordered) {
+        key = old_to_new[key];
+    }
     storage->reconstruct(key, recons);
+}
+
+namespace {
+
+/// Shared permutation applier for both flat BFS and hierarchical reordering.
+void apply_acorn_permutation(
+        IndexACORN& index,
+        const std::vector<ACORN::storage_idx_t>& old_to_new,
+        const std::vector<ACORN::storage_idx_t>& new_to_old) {
+    const size_t n = static_cast<size_t>(index.ntotal);
+    ACORN& acorn = index.acorn;
+
+    // 1. Permute underlying vector storage (IndexFlatCodes / IndexFlat)
+    if (auto* flat_codes = dynamic_cast<IndexFlatCodes*>(index.storage)) {
+        const size_t cs = flat_codes->code_size;
+        std::vector<uint8_t> new_codes(n * cs);
+        for (size_t new_id = 0; new_id < n; new_id++) {
+            size_t old_id = static_cast<size_t>(new_to_old[new_id]);
+            std::memcpy(
+                    new_codes.data() + new_id * cs,
+                    flat_codes->codes.data() + old_id * cs,
+                    cs);
+        }
+        flat_codes->codes.swap(new_codes);
+    } else {
+        FAISS_THROW_MSG("Graph reordering currently requires IndexFlatCodes-backed storage");
+    }
+
+    // 2. Permute metadata copy if present
+    if (acorn.metadata != nullptr) {
+        index.reordered_metadata.resize(n);
+        for (size_t new_id = 0; new_id < n; new_id++) {
+            index.reordered_metadata[new_id] = acorn.metadata[new_to_old[new_id]];
+        }
+        acorn.metadata = index.reordered_metadata.data();
+    }
+
+    // 3. Permute levels and rebuild offsets
+    std::vector<int> new_levels(n);
+    std::vector<size_t> new_offsets(n + 1, 0);
+    for (size_t new_id = 0; new_id < n; new_id++) {
+        size_t old_id = static_cast<size_t>(new_to_old[new_id]);
+        int lv = acorn.levels[old_id];
+        new_levels[new_id] = lv;
+        new_offsets[new_id + 1] = new_offsets[new_id] + acorn.cum_nb_neighbors(lv);
+    }
+
+    // 4. Permute and rewrite all neighbor IDs across all levels
+    std::vector<ACORN::NeighNode> new_neighbors(new_offsets[n], ACORN::NeighNode(-1));
+    for (size_t new_id = 0; new_id < n; new_id++) {
+        size_t old_id = static_cast<size_t>(new_to_old[new_id]);
+        int lv = new_levels[new_id];
+        for (int layer = 0; layer < lv; layer++) {
+            size_t old_begin = 0, old_end = 0;
+            acorn.neighbor_range(static_cast<idx_t>(old_id), layer, &old_begin, &old_end);
+            size_t dst = new_offsets[new_id] + acorn.cum_nb_neighbors(layer);
+            for (size_t j = old_begin; j < old_end; j++) {
+                ACORN::storage_idx_t v = acorn.neighbors[j];
+                if (v < 0) {
+                    break;
+                }
+                new_neighbors[dst++] = old_to_new[v];
+            }
+        }
+    }
+
+    acorn.levels.swap(new_levels);
+    acorn.offsets.swap(new_offsets);
+    acorn.neighbors.swap(new_neighbors);
+    if (acorn.entry_point >= 0) {
+        acorn.entry_point = old_to_new[acorn.entry_point];
+    }
+    index.is_reordered = true;
+}
+
+} // namespace
+
+void IndexACORN::reorder_graph_bfs() {
+    if (ntotal <= 1 || is_reordered) {
+        return;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexACORNFlat (or variants) before reordering");
+
+    const size_t n = static_cast<size_t>(ntotal);
+    old_to_new.assign(n, -1);
+    new_to_old.clear();
+    new_to_old.reserve(n);
+
+    std::vector<storage_idx_t> bfs_queue;
+    bfs_queue.reserve(n);
+
+    auto run_bfs_from = [&](storage_idx_t start_node) {
+        if (start_node < 0 || static_cast<size_t>(start_node) >= n) {
+            return;
+        }
+        if (old_to_new[start_node] != -1) {
+            return;
+        }
+        old_to_new[start_node] = static_cast<storage_idx_t>(new_to_old.size());
+        new_to_old.push_back(start_node);
+        size_t head = bfs_queue.size();
+        bfs_queue.push_back(start_node);
+
+        while (head < bfs_queue.size()) {
+            storage_idx_t u = bfs_queue[head++];
+            size_t begin = 0, end = 0;
+            acorn.neighbor_range(u, 0, &begin, &end);
+            for (size_t j = begin; j < end; j++) {
+                storage_idx_t v = acorn.neighbors[j];
+                if (v < 0) {
+                    break;
+                }
+                if (old_to_new[v] == -1) {
+                    old_to_new[v] = static_cast<storage_idx_t>(new_to_old.size());
+                    new_to_old.push_back(v);
+                    bfs_queue.push_back(v);
+                }
+            }
+        }
+    };
+
+    // Seed from ACORN entry point (top-level hub) first, then cover any remaining components
+    if (acorn.entry_point >= 0) {
+        run_bfs_from(acorn.entry_point);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (old_to_new[i] == -1) {
+            run_bfs_from(static_cast<storage_idx_t>(i));
+        }
+    }
+    FAISS_ASSERT(new_to_old.size() == n);
+
+    apply_acorn_permutation(*this, old_to_new, new_to_old);
+}
+
+size_t IndexACORN::reorder_graph_hierarchical(size_t local_bfs_budget) {
+    if (ntotal <= 1 || is_reordered) {
+        return 0;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            storage,
+            "Please use IndexACORNFlat (or variants) before reordering");
+
+    const size_t n = static_cast<size_t>(ntotal);
+    if (local_bfs_budget == 0) {
+        local_bfs_budget = 128;
+    }
+
+    old_to_new.assign(n, -1);
+    new_to_old.clear();
+    new_to_old.reserve(n);
+
+    // Step 1: Collect and order upper-level centroids (levels[i] >= 2 => present on layer >= 1)
+    // using BFS on layer 1 seeded from entry_point (only ~N/M nodes).
+    std::vector<storage_idx_t> upper_centroids;
+    std::vector<uint8_t> upper_seen(n, 0);
+    size_t peak_queue = 0;
+
+    auto bfs_upper_layer = [&](storage_idx_t seed, int layer) {
+        if (seed < 0 || static_cast<size_t>(seed) >= n || upper_seen[seed]) {
+            return;
+        }
+        if (acorn.levels[seed] <= layer) {
+            return;
+        }
+        size_t head = upper_centroids.size();
+        upper_seen[seed] = 1;
+        upper_centroids.push_back(seed);
+        while (head < upper_centroids.size()) {
+            storage_idx_t u = upper_centroids[head++];
+            if (acorn.levels[u] <= layer) {
+                continue;
+            }
+            size_t begin = 0, end = 0;
+            acorn.neighbor_range(u, layer, &begin, &end);
+            for (size_t j = begin; j < end; j++) {
+                storage_idx_t v = acorn.neighbors[j];
+                if (v < 0) {
+                    break;
+                }
+                if (!upper_seen[v] && acorn.levels[v] > layer) {
+                    upper_seen[v] = 1;
+                    upper_centroids.push_back(v);
+                }
+            }
+        }
+    };
+
+    if (acorn.max_level >= 1) {
+        if (acorn.entry_point >= 0) {
+            bfs_upper_layer(acorn.entry_point, 1);
+        }
+        for (size_t i = 0; i < n; i++) {
+            if (acorn.levels[i] >= 2 && !upper_seen[i]) {
+                bfs_upper_layer(static_cast<storage_idx_t>(i), 1);
+            }
+        }
+    }
+    peak_queue = std::max(peak_queue, upper_centroids.size());
+    std::vector<uint8_t>().swap(upper_seen);
+
+    // Step 2: Bounded localized Level-0 BFS around each ordered centroid (O(budget) queue)
+    std::vector<storage_idx_t> local_q;
+    local_q.reserve(local_bfs_budget + 128);
+
+    auto run_bounded_l0_bfs = [&](storage_idx_t seed) {
+        if (seed < 0 || static_cast<size_t>(seed) >= n || old_to_new[seed] != -1) {
+            return;
+        }
+        local_q.clear();
+        old_to_new[seed] = static_cast<storage_idx_t>(new_to_old.size());
+        new_to_old.push_back(seed);
+        local_q.push_back(seed);
+
+        size_t head = 0;
+        while (head < local_q.size() && local_q.size() < local_bfs_budget) {
+            storage_idx_t u = local_q[head++];
+            size_t begin = 0, end = 0;
+            acorn.neighbor_range(u, 0, &begin, &end);
+            for (size_t j = begin; j < end; j++) {
+                storage_idx_t v = acorn.neighbors[j];
+                if (v < 0) {
+                    break;
+                }
+                if (old_to_new[v] == -1) {
+                    old_to_new[v] = static_cast<storage_idx_t>(new_to_old.size());
+                    new_to_old.push_back(v);
+                    local_q.push_back(v);
+                    if (local_q.size() >= local_bfs_budget) {
+                        break;
+                    }
+                }
+            }
+        }
+        peak_queue = std::max(peak_queue, local_q.size());
+    };
+
+    for (storage_idx_t c : upper_centroids) {
+        run_bounded_l0_bfs(c);
+    }
+
+    // Step 3: Sweep any remaining unvisited Level-0 nodes with bounded local BFS
+    for (size_t i = 0; i < n; i++) {
+        if (old_to_new[i] == -1) {
+            run_bounded_l0_bfs(static_cast<storage_idx_t>(i));
+        }
+    }
+    FAISS_ASSERT(new_to_old.size() == n);
+
+    apply_acorn_permutation(*this, old_to_new, new_to_old);
+    return peak_queue;
+}
+
+void IndexACORN::compress_neighbors_vbyte(bool free_uncompressed_l0) {
+    if (ntotal == 0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            !acorn.l0_freed,
+            "Uncompressed Level-0 neighbors have already been freed");
+
+    const size_t n = static_cast<size_t>(ntotal);
+    const bool preserve_m_beta_split = (acorn.gamma > 1 && acorn.M_beta > 0);
+
+    acorn.compressed_l0_neighbors.clear();
+    acorn.compressed_l0_neighbors.reserve(n * 96);
+    acorn.compressed_l0_offsets.assign(n + 1, 0);
+    acorn.compressed_l0_counts.assign(n, 0);
+    if (preserve_m_beta_split) {
+        acorn.compressed_l0_prefix_counts.assign(n, 0);
+    } else {
+        acorn.compressed_l0_prefix_counts.clear();
+    }
+
+    std::vector<int32_t> tmp;
+    tmp.reserve(static_cast<size_t>(acorn.nb_neighbors(0)));
+
+    for (size_t i = 0; i < n; i++) {
+        size_t begin = 0, end = 0;
+        acorn.neighbor_range(static_cast<idx_t>(i), 0, &begin, &end);
+        tmp.clear();
+        for (size_t j = begin; j < end; j++) {
+            storage_idx_t v = acorn.neighbors[j];
+            if (v < 0) {
+                break;
+            }
+            tmp.push_back(v);
+        }
+
+        const size_t count = tmp.size();
+        acorn.compressed_l0_counts[i] = static_cast<uint16_t>(count);
+
+        if (count > 0) {
+            if (!preserve_m_beta_split) {
+                std::sort(tmp.begin(), tmp.end());
+                codec::VByteCodec::encode_delta_list(
+                        tmp.data(), count, acorn.compressed_l0_neighbors);
+            } else {
+                size_t split = std::min(count, static_cast<size_t>(acorn.M_beta));
+                acorn.compressed_l0_prefix_counts[i] = static_cast<uint16_t>(split);
+                std::sort(tmp.begin(), tmp.begin() + split);
+                codec::VByteCodec::encode_delta_list(
+                        tmp.data(), split, acorn.compressed_l0_neighbors);
+                if (count > split) {
+                    std::sort(tmp.begin() + split, tmp.end());
+                    codec::VByteCodec::encode_delta_list(
+                            tmp.data() + split,
+                            count - split,
+                            acorn.compressed_l0_neighbors);
+                }
+            }
+        }
+        acorn.compressed_l0_offsets[i + 1] = acorn.compressed_l0_neighbors.size();
+    }
+
+    acorn.compressed_l0_neighbors.shrink_to_fit();
+    acorn.use_compressed_l0 = true;
+    acorn.l0_compression_mode = ACORN::L0CompressionMode::VBYTE;
+
+    if (free_uncompressed_l0) {
+        const size_t l0_slots = static_cast<size_t>(acorn.nb_neighbors(0));
+        std::vector<size_t> upper_offsets(n + 1, 0);
+        for (size_t i = 0; i < n; i++) {
+            size_t total_slots = static_cast<size_t>(acorn.cum_nb_neighbors(acorn.levels[i]));
+            size_t upper_slots = (total_slots > l0_slots) ? (total_slots - l0_slots) : 0;
+            upper_offsets[i + 1] = upper_offsets[i] + upper_slots;
+        }
+
+        std::vector<ACORN::NeighNode> upper_neighbors(
+                upper_offsets[n], ACORN::NeighNode(-1));
+        for (size_t i = 0; i < n; i++) {
+            size_t upper_slots = upper_offsets[i + 1] - upper_offsets[i];
+            if (upper_slots > 0) {
+                size_t old_upper_begin = acorn.offsets[i] + l0_slots;
+                std::memcpy(
+                        upper_neighbors.data() + upper_offsets[i],
+                        acorn.neighbors.data() + old_upper_begin,
+                        upper_slots * sizeof(ACORN::NeighNode));
+            }
+        }
+
+        acorn.offsets.swap(upper_offsets);
+        acorn.neighbors.swap(upper_neighbors);
+        std::vector<ACORN::NeighNode>().swap(upper_neighbors); // release old L0 buffer immediately
+        acorn.l0_freed = true;
+    }
+}
+
+void IndexACORN::compress_neighbors_simd_bp128(
+        bool free_uncompressed_l0,
+        int proximity_prefix) {
+    if (ntotal == 0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            !acorn.l0_freed,
+            "Uncompressed Level-0 neighbors have already been freed");
+
+    const size_t n = static_cast<size_t>(ntotal);
+    const size_t split_limit = (acorn.gamma > 1 && acorn.M_beta > 0)
+            ? static_cast<size_t>(acorn.M_beta)
+            : (proximity_prefix > 0 ? static_cast<size_t>(proximity_prefix) : 0);
+    const bool use_two_segments = (split_limit > 0);
+
+    acorn.compressed_l0_neighbors.clear();
+    acorn.compressed_l0_neighbors.reserve(n * 112);
+    acorn.compressed_l0_offsets.assign(n + 1, 0);
+    acorn.compressed_l0_counts.assign(n, 0);
+    if (use_two_segments) {
+        acorn.compressed_l0_prefix_counts.assign(n, 0);
+    } else {
+        acorn.compressed_l0_prefix_counts.clear();
+    }
+
+    std::vector<int32_t> tmp;
+    tmp.reserve(static_cast<size_t>(acorn.nb_neighbors(0)));
+
+    for (size_t i = 0; i < n; i++) {
+        size_t begin = 0, end = 0;
+        acorn.neighbor_range(static_cast<idx_t>(i), 0, &begin, &end);
+        tmp.clear();
+        for (size_t j = begin; j < end; j++) {
+            storage_idx_t v = acorn.neighbors[j];
+            if (v < 0) {
+                break;
+            }
+            tmp.push_back(v);
+        }
+
+        const size_t count = tmp.size();
+        acorn.compressed_l0_counts[i] = static_cast<uint16_t>(count);
+
+        if (count > 0) {
+            if (!use_two_segments) {
+                std::sort(tmp.begin(), tmp.end());
+                codec::SimdBP128Codec::encode_delta_list(
+                        tmp.data(), count, acorn.compressed_l0_neighbors);
+            } else {
+                size_t split = std::min(count, split_limit);
+                acorn.compressed_l0_prefix_counts[i] = static_cast<uint16_t>(split);
+                std::sort(tmp.begin(), tmp.begin() + split);
+                codec::SimdBP128Codec::encode_delta_list(
+                        tmp.data(), split, acorn.compressed_l0_neighbors);
+                if (count > split) {
+                    std::sort(tmp.begin() + split, tmp.end());
+                    codec::SimdBP128Codec::encode_delta_list(
+                            tmp.data() + split,
+                            count - split,
+                            acorn.compressed_l0_neighbors);
+                }
+            }
+        }
+        acorn.compressed_l0_offsets[i + 1] = acorn.compressed_l0_neighbors.size();
+    }
+
+    // Append trailing zero padding for safe 128-bit/256-bit unaligned AVX2 loads
+    acorn.compressed_l0_neighbors.resize(
+            acorn.compressed_l0_neighbors.size() + codec::SimdBP128Codec::PADDING_BYTES,
+            0);
+    acorn.compressed_l0_neighbors.shrink_to_fit();
+    acorn.use_compressed_l0 = true;
+    acorn.l0_compression_mode = ACORN::L0CompressionMode::SIMD_BP128;
+
+    if (free_uncompressed_l0) {
+        const size_t l0_slots = static_cast<size_t>(acorn.nb_neighbors(0));
+        std::vector<size_t> upper_offsets(n + 1, 0);
+        for (size_t i = 0; i < n; i++) {
+            size_t total_slots = static_cast<size_t>(acorn.cum_nb_neighbors(acorn.levels[i]));
+            size_t upper_slots = (total_slots > l0_slots) ? (total_slots - l0_slots) : 0;
+            upper_offsets[i + 1] = upper_offsets[i] + upper_slots;
+        }
+
+        std::vector<ACORN::NeighNode> upper_neighbors(
+                upper_offsets[n], ACORN::NeighNode(-1));
+        for (size_t i = 0; i < n; i++) {
+            size_t upper_slots = upper_offsets[i + 1] - upper_offsets[i];
+            if (upper_slots > 0) {
+                size_t old_upper_begin = acorn.offsets[i] + l0_slots;
+                std::memcpy(
+                        upper_neighbors.data() + upper_offsets[i],
+                        acorn.neighbors.data() + old_upper_begin,
+                        upper_slots * sizeof(ACORN::NeighNode));
+            }
+        }
+
+        acorn.offsets.swap(upper_offsets);
+        acorn.neighbors.swap(upper_neighbors);
+        std::vector<ACORN::NeighNode>().swap(upper_neighbors);
+        acorn.l0_freed = true;
+    }
+}
+
+void IndexACORN::enable_dynamic_gaps(double gap_ratio, size_t cluster_size) {
+    if (ntotal == 0 || gap_ratio <= 0.0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            !acorn.use_compressed_l0,
+            "Call enable_dynamic_gaps() after reordering and BEFORE compressing L0");
+    FAISS_THROW_IF_NOT_MSG(
+            is_reordered,
+            "Call reorder_graph_hierarchical() or reorder_graph_bfs() before enable_dynamic_gaps()");
+
+    const size_t old_n = static_cast<size_t>(ntotal);
+    if (cluster_size == 0) {
+        cluster_size = 1000;
+    }
+    const size_t gap_per_cluster =
+            std::max<size_t>(1, static_cast<size_t>(std::llround(cluster_size * gap_ratio)));
+    const size_t stride = cluster_size + gap_per_cluster;
+    const size_t num_clusters = (old_n + cluster_size - 1) / cluster_size;
+    const size_t new_cap = num_clusters * stride;
+
+    // Map dense reordered ID `d` -> gapped internal ID `g`
+    std::vector<storage_idx_t> dense_to_gap(old_n);
+    std::vector<storage_idx_t> new_n2o(new_cap, -1);
+    std::vector<storage_idx_t> new_o2n(old_n, -1);
+
+    cluster_free_cursor.resize(num_clusters);
+    cluster_end_id.resize(num_clusters);
+
+    for (size_t c = 0; c < num_clusters; c++) {
+        size_t d_start = c * cluster_size;
+        size_t d_end = std::min(old_n, d_start + cluster_size);
+        size_t g_base = c * stride;
+        for (size_t d = d_start; d < d_end; d++) {
+            storage_idx_t g = static_cast<storage_idx_t>(g_base + (d - d_start));
+            dense_to_gap[d] = g;
+            storage_idx_t ext_id = new_to_old[d];
+            new_n2o[g] = ext_id;
+            new_o2n[ext_id] = g;
+        }
+        cluster_free_cursor[c] = static_cast<storage_idx_t>(g_base + (d_end - d_start));
+        cluster_end_id[c] = static_cast<storage_idx_t>(g_base + stride);
+    }
+
+    // 1. Expand IndexFlatCodes vector storage with empty gap slots
+    if (auto* flat_codes = dynamic_cast<IndexFlatCodes*>(storage)) {
+        const size_t cs = flat_codes->code_size;
+        std::vector<uint8_t> gapped_codes(new_cap * cs, 0);
+        for (size_t d = 0; d < old_n; d++) {
+            size_t g = static_cast<size_t>(dense_to_gap[d]);
+            std::memcpy(
+                    gapped_codes.data() + g * cs,
+                    flat_codes->codes.data() + d * cs,
+                    cs);
+        }
+        flat_codes->codes.swap(gapped_codes);
+        flat_codes->ntotal = static_cast<idx_t>(new_cap);
+    } else {
+        FAISS_THROW_MSG("enable_dynamic_gaps requires IndexFlatCodes-backed storage");
+    }
+
+    // 2. Expand metadata
+    if (acorn.metadata != nullptr) {
+        std::vector<int> gapped_meta(new_cap, -1);
+        for (size_t d = 0; d < old_n; d++) {
+            gapped_meta[dense_to_gap[d]] = acorn.metadata[d];
+        }
+        reordered_metadata.swap(gapped_meta);
+        acorn.metadata = reordered_metadata.data();
+    }
+
+    // 3. Expand levels, offsets, and rewrite neighbor IDs into gapped space
+    std::vector<int> gapped_levels(new_cap, 1);
+    for (size_t d = 0; d < old_n; d++) {
+        gapped_levels[dense_to_gap[d]] = acorn.levels[d];
+    }
+    std::vector<size_t> gapped_offsets(new_cap + 1, 0);
+    for (size_t g = 0; g < new_cap; g++) {
+        gapped_offsets[g + 1] = gapped_offsets[g] + acorn.cum_nb_neighbors(gapped_levels[g]);
+    }
+    std::vector<ACORN::NeighNode> gapped_neighbors(gapped_offsets[new_cap], ACORN::NeighNode(-1));
+    for (size_t d = 0; d < old_n; d++) {
+        size_t g = static_cast<size_t>(dense_to_gap[d]);
+        int lv = gapped_levels[g];
+        for (int layer = 0; layer < lv; layer++) {
+            size_t old_begin = 0, old_end = 0;
+            acorn.neighbor_range(static_cast<idx_t>(d), layer, &old_begin, &old_end);
+            size_t dst = gapped_offsets[g] + acorn.cum_nb_neighbors(layer);
+            for (size_t j = old_begin; j < old_end; j++) {
+                storage_idx_t v = acorn.neighbors[j];
+                if (v < 0) {
+                    break;
+                }
+                gapped_neighbors[dst++] = dense_to_gap[v];
+            }
+        }
+    }
+
+    acorn.levels.swap(gapped_levels);
+    acorn.offsets.swap(gapped_offsets);
+    acorn.neighbors.swap(gapped_neighbors);
+    if (acorn.entry_point >= 0) {
+        acorn.entry_point = dense_to_gap[acorn.entry_point];
+    }
+
+    old_to_new.swap(new_o2n);
+    new_to_old.swap(new_n2o);
+    ntotal = static_cast<idx_t>(new_cap);
+    has_dynamic_gaps = true;
+    gap_cluster_stride = stride;
+    gap_occupied_per_cluster = cluster_size;
+    dynamic_external_count = old_n;
+}
+
+size_t IndexACORN::add_dynamic(
+        idx_t n_add,
+        const float* x,
+        const int* new_metadata,
+        int ef_insert) {
+    if (n_add <= 0) {
+        return 0;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            acorn.use_compressed_l0 && has_dynamic_gaps,
+            "Call enable_dynamic_gaps() and compress_neighbors_simd_bp128() before add_dynamic()");
+
+    auto* flat_codes = dynamic_cast<IndexFlatCodes*>(storage);
+    FAISS_THROW_IF_NOT_MSG(flat_codes != nullptr, "add_dynamic requires IndexFlatCodes storage");
+
+    if (acorn.has_overflow.size() < static_cast<size_t>(ntotal)) {
+        acorn.has_overflow.resize(static_cast<size_t>(ntotal), 0);
+    }
+
+    const size_t cs = flat_codes->code_size;
+    const size_t num_clusters = cluster_free_cursor.size();
+    const int k_link = std::min(acorn.M, 32);
+
+    SearchParametersACORN sp;
+    sp.efSearch = std::max(ef_insert, k_link);
+
+    VisitedTable vt(static_cast<size_t>(ntotal));
+    DistanceComputer* dis = storage_distance_computer(storage);
+    ScopeDeleter1<DistanceComputer> del(dis);
+
+    std::vector<float> D_tmp(k_link);
+    std::vector<idx_t> I_tmp(k_link);
+    size_t local_cluster_hits = 0;
+
+    for (idx_t i = 0; i < n_add; i++) {
+        const float* vec = x + static_cast<size_t>(i) * d;
+        dis->set_query(vec);
+        maxheap_heapify(k_link, D_tmp.data(), I_tmp.data());
+        acorn.search(*dis, k_link, I_tmp.data(), D_tmp.data(), vt, &sp);
+        maxheap_reorder(k_link, D_tmp.data(), I_tmp.data());
+
+        // Pick nearest existing neighbor to determine target BFS cluster
+        storage_idx_t anchor = (I_tmp[0] >= 0) ? static_cast<storage_idx_t>(I_tmp[0]) : 0;
+        size_t target_c = std::min(
+                num_clusters - 1,
+                static_cast<size_t>(anchor) / gap_cluster_stride);
+
+        // Allocate nearest free gap ID (O(1) local cluster check, then radial probe)
+        storage_idx_t slot = -1;
+        if (cluster_free_cursor[target_c] < cluster_end_id[target_c]) {
+            slot = cluster_free_cursor[target_c]++;
+            local_cluster_hits++;
+        } else {
+            for (size_t delta = 1; delta < num_clusters; delta++) {
+                if (target_c + delta < num_clusters &&
+                    cluster_free_cursor[target_c + delta] < cluster_end_id[target_c + delta]) {
+                    slot = cluster_free_cursor[target_c + delta]++;
+                    break;
+                }
+                if (target_c >= delta &&
+                    cluster_free_cursor[target_c - delta] < cluster_end_id[target_c - delta]) {
+                    slot = cluster_free_cursor[target_c - delta]++;
+                    break;
+                }
+            }
+        }
+
+        // Tail fallback if all pre-allocated cluster gaps are full
+        if (slot < 0) {
+            slot = static_cast<storage_idx_t>(ntotal);
+            ntotal++;
+            flat_codes->ntotal = ntotal;
+            flat_codes->codes.resize(static_cast<size_t>(ntotal) * cs, 0);
+            acorn.levels.push_back(1);
+            acorn.offsets.push_back(acorn.offsets.back());
+            acorn.compressed_l0_counts.push_back(0);
+            acorn.compressed_l0_offsets.push_back(acorn.compressed_l0_offsets.back());
+            if (!acorn.compressed_l0_prefix_counts.empty()) {
+                acorn.compressed_l0_prefix_counts.push_back(0);
+            }
+            acorn.has_overflow.push_back(0);
+            new_to_old.push_back(-1);
+            if (!reordered_metadata.empty()) {
+                reordered_metadata.push_back(-1);
+                acorn.metadata = reordered_metadata.data();
+            }
+            vt = VisitedTable(static_cast<size_t>(ntotal));
+            // Recreate DistanceComputer since flat_codes->codes may have reallocated
+            delete dis;
+            dis = storage_distance_computer(storage);
+            del.ptr = dis;
+        }
+
+        // Write new vector & bidirectional ID maps
+        std::memcpy(flat_codes->codes.data() + static_cast<size_t>(slot) * cs, vec, cs);
+        storage_idx_t ext_id = static_cast<storage_idx_t>(dynamic_external_count++);
+        if (static_cast<size_t>(ext_id) >= old_to_new.size()) {
+            old_to_new.resize(static_cast<size_t>(ext_id) + 1, -1);
+        }
+        old_to_new[ext_id] = slot;
+        new_to_old[slot] = ext_id;
+        if (new_metadata != nullptr && !reordered_metadata.empty()) {
+            reordered_metadata[slot] = new_metadata[i];
+        }
+
+        // Store forward links & bidirectional back-edges in Delta-Overflow Buffer
+        auto& fwd = acorn.overflow_l0[slot];
+        fwd.reserve(k_link);
+        acorn.has_overflow[slot] = 1;
+        for (int j = 0; j < k_link; j++) {
+            storage_idx_t nb_id = static_cast<storage_idx_t>(I_tmp[j]);
+            if (nb_id >= 0 && nb_id != slot) {
+                fwd.push_back(nb_id);
+                acorn.overflow_l0[nb_id].push_back(slot);
+                acorn.has_overflow[nb_id] = 1;
+            }
+        }
+    }
+
+    return local_cluster_hits;
+}
+
+void IndexACORN::compact_dynamic_l0(int proximity_prefix) {
+    if (!acorn.use_compressed_l0 || acorn.overflow_l0.empty()) {
+        return;
+    }
+
+    const size_t n = static_cast<size_t>(ntotal);
+    const size_t split_limit = (acorn.gamma > 1 && acorn.M_beta > 0)
+            ? static_cast<size_t>(acorn.M_beta)
+            : (proximity_prefix > 0 ? static_cast<size_t>(proximity_prefix) : 0);
+    const bool use_two_segments = (split_limit > 0);
+
+    std::vector<uint8_t> new_payload;
+    new_payload.reserve(acorn.compressed_l0_neighbors.size() + acorn.overflow_l0.size() * 64);
+    std::vector<size_t> new_offsets(n + 1, 0);
+    std::vector<uint16_t> new_counts(n, 0);
+    std::vector<uint16_t> new_prefix;
+    if (use_two_segments) {
+        new_prefix.assign(n, 0);
+    }
+
+    int32_t dec_buf[1024];
+    std::vector<int32_t> merged;
+    merged.reserve(256);
+
+    for (size_t i = 0; i < n; i++) {
+        size_t cnt = acorn.decode_l0_neighbors(static_cast<idx_t>(i), dec_buf);
+        merged.assign(dec_buf, dec_buf + cnt);
+        if (cnt > 1) {
+            if (!use_two_segments) {
+                std::sort(merged.begin(), merged.end());
+                merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+            } else {
+                size_t split = std::min(merged.size(), split_limit);
+                std::sort(merged.begin(), merged.begin() + split);
+                auto it1 = std::unique(merged.begin(), merged.begin() + split);
+                size_t unique_prefix = static_cast<size_t>(it1 - merged.begin());
+                std::vector<int32_t> tail(merged.begin() + split, merged.end());
+                std::sort(tail.begin(), tail.end());
+                tail.erase(std::unique(tail.begin(), tail.end()), tail.end());
+                merged.resize(unique_prefix);
+                for (int32_t v : tail) {
+                    if (!std::binary_search(merged.begin(), merged.begin() + unique_prefix, v)) {
+                        merged.push_back(v);
+                    }
+                }
+                new_prefix[i] = static_cast<uint16_t>(unique_prefix);
+            }
+        } else if (use_two_segments) {
+            new_prefix[i] = static_cast<uint16_t>(merged.size());
+        }
+
+        new_counts[i] = static_cast<uint16_t>(merged.size());
+        if (!merged.empty()) {
+            if (!use_two_segments) {
+                codec::SimdBP128Codec::encode_delta_list(
+                        merged.data(), merged.size(), new_payload);
+            } else {
+                size_t split = new_prefix[i];
+                codec::SimdBP128Codec::encode_delta_list(merged.data(), split, new_payload);
+                if (merged.size() > split) {
+                    codec::SimdBP128Codec::encode_delta_list(
+                            merged.data() + split, merged.size() - split, new_payload);
+                }
+            }
+        }
+        new_offsets[i + 1] = new_payload.size();
+    }
+
+    new_payload.resize(new_payload.size() + codec::SimdBP128Codec::PADDING_BYTES, 0);
+    new_payload.shrink_to_fit();
+
+    acorn.compressed_l0_neighbors.swap(new_payload);
+    acorn.compressed_l0_offsets.swap(new_offsets);
+    acorn.compressed_l0_counts.swap(new_counts);
+    acorn.compressed_l0_prefix_counts.swap(new_prefix);
+    acorn.l0_compression_mode = ACORN::L0CompressionMode::SIMD_BP128;
+
+    // Clear Delta-Overflow Buffer cleanly
+    acorn.overflow_l0.clear();
+    std::fill(acorn.has_overflow.begin(), acorn.has_overflow.end(), 0);
 }
 
 

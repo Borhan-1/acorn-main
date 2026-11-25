@@ -96,6 +96,15 @@ inline int __builtin_clzll(uint64_t x) {
 
 #endif // _MSC_VER
 
+#if defined(_WIN32) && !defined(_MSC_VER)
+#include <cerrno>
+#include <cstdlib>
+#define posix_memalign(p, a, s) \
+    (((*(p)) = _aligned_malloc((s), (a))), *(p) ? 0 : errno)
+#undef posix_memalign_free
+#define posix_memalign_free _aligned_free
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define FAISS_DEPRECATED(msg) __attribute__((deprecated(msg)))
 #else

@@ -10,6 +10,7 @@
 #pragma once
 
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -17,6 +18,8 @@
 
 #include <faiss/Index.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/impl/codec/simd_bp128.h>
+#include <faiss/impl/codec/vbyte_codec.h>
 #include <faiss/impl/platform_macros.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/random.h>
@@ -39,6 +42,8 @@ struct ACORNStats;
 struct SearchParametersACORN : SearchParameters {
     int efSearch = 16;
     bool check_relative_distance = true;
+    bool assume_reordered_filter = false;
+    bool enable_decode_timing = false;
 
     ~SearchParametersACORN() {}
 };
@@ -117,6 +122,74 @@ struct ACORN {
     /// neighbors[offsets[i]:offsets[i+1]] is the list of neighbors of vector i
     /// for all levels. this is where all storage goes.
     std::vector<NeighNode> neighbors; // changed to add metadata
+
+    // Compressed Level-0 neighbor storage (Option A: VByte, Option B: AVX2 SIMD-BP128)
+    enum class L0CompressionMode : uint8_t { NONE = 0, VBYTE = 1, SIMD_BP128 = 2 };
+    bool use_compressed_l0 = false;
+    bool l0_freed = false;
+    L0CompressionMode l0_compression_mode = L0CompressionMode::NONE;
+    std::vector<uint8_t> compressed_l0_neighbors;
+    std::vector<size_t> compressed_l0_offsets;
+    std::vector<uint16_t> compressed_l0_counts;
+    std::vector<uint16_t> compressed_l0_prefix_counts; // optional 2-segment split (M_beta or proximity prefix)
+
+    // Dynamic insertion Delta-Overflow Buffer (Part 3D: Cluster-Gapped IDs + Overflow)
+    std::vector<uint8_t> has_overflow;
+    std::unordered_map<storage_idx_t, std::vector<storage_idx_t>> overflow_l0;
+
+    /// Decode Level-0 neighbors of node `no` into caller-provided stack buffer.
+    inline size_t decode_l0_neighbors(idx_t no, int32_t* out_buf) const {
+        size_t count = (static_cast<size_t>(no) < compressed_l0_counts.size())
+                ? compressed_l0_counts[no]
+                : 0;
+        if (count > 0) {
+            const uint8_t* ptr =
+                    compressed_l0_neighbors.data() + compressed_l0_offsets[no];
+            if (l0_compression_mode == L0CompressionMode::SIMD_BP128) {
+                if (compressed_l0_prefix_counts.empty()) {
+                    codec::SimdBP128Codec::decode_delta_list(ptr, count, out_buf);
+                } else {
+                    size_t split = compressed_l0_prefix_counts[no];
+                    const uint8_t* p = codec::SimdBP128Codec::decode_delta_list(
+                            ptr, split, out_buf);
+                    if (count > split) {
+                        codec::SimdBP128Codec::decode_delta_list(
+                                p, count - split, out_buf + split);
+                    }
+                }
+            } else {
+                // Option A: Scalar VByte
+                if (compressed_l0_prefix_counts.empty()) {
+                    codec::VByteCodec::decode_delta_list(ptr, count, out_buf);
+                } else {
+                    size_t split = compressed_l0_prefix_counts[no];
+                    const uint8_t* p = ptr;
+                    uint32_t prev = 0;
+                    for (size_t i = 0; i < split; ++i) {
+                        prev += codec::VByteCodec::decode_uint32(p);
+                        out_buf[i] = static_cast<int32_t>(prev);
+                    }
+                    prev = 0;
+                    for (size_t i = split; i < count; ++i) {
+                        prev += codec::VByteCodec::decode_uint32(p);
+                        out_buf[i] = static_cast<int32_t>(prev);
+                    }
+                }
+            }
+        }
+        // Append any dynamically inserted overflow edges (zero cost when has_overflow is empty)
+        if (!has_overflow.empty() && has_overflow[static_cast<size_t>(no)]) {
+            auto it = overflow_l0.find(static_cast<storage_idx_t>(no));
+            if (it != overflow_l0.end()) {
+                for (storage_idx_t v : it->second) {
+                    if (count < 1024) {
+                        out_buf[count++] = v;
+                    }
+                }
+            }
+        }
+        return count;
+    }
 
 
     /// entry point in the search structure (one of the points with maximum
@@ -285,6 +358,11 @@ struct ACORNStats {
     double skips;
     double visits;
 
+    // Compression decode instrumentation (Phase 2C)
+    size_t decode_calls;
+    size_t decoded_edges;
+    double decode_time_us;
+
 
     ACORNStats(
             size_t n1 = 0,
@@ -296,8 +374,11 @@ struct ACORNStats {
             double neighbors_loop = 0.0,
             double tuple_unwrap = 0.0,
             double skips = 0.0,
-            double visits = 0.0)
-            : n1(n1), n2(n2), n3(n3), ndis(ndis), nreorder(nreorder), candidates_loop(candidates_loop), neighbors_loop(neighbors_loop), tuple_unwrap(tuple_unwrap), skips(skips), visits(visits) {}
+            double visits = 0.0,
+            size_t decode_calls = 0,
+            size_t decoded_edges = 0,
+            double decode_time_us = 0.0)
+            : n1(n1), n2(n2), n3(n3), ndis(ndis), nreorder(nreorder), candidates_loop(candidates_loop), neighbors_loop(neighbors_loop), tuple_unwrap(tuple_unwrap), skips(skips), visits(visits), decode_calls(decode_calls), decoded_edges(decoded_edges), decode_time_us(decode_time_us) {}
 
     void reset() {
         n1 = n2 = n3 = 0;
@@ -310,6 +391,10 @@ struct ACORNStats {
         tuple_unwrap = 0.0;
         skips = 0.0;
         visits = 0.0;
+
+        decode_calls = 0;
+        decoded_edges = 0;
+        decode_time_us = 0.0;
     }
 
     void combine(const ACORNStats& other) {
@@ -325,6 +410,10 @@ struct ACORNStats {
         tuple_unwrap += other.tuple_unwrap;
         skips = other.skips;
         visits = other.visits;
+
+        decode_calls += other.decode_calls;
+        decoded_edges += other.decoded_edges;
+        decode_time_us += other.decode_time_us;
     }
 };
 

@@ -210,6 +210,12 @@ set(FAISS_HEADERS ${FAISS_HEADERS} PARENT_SCOPE)
 
 add_library(faiss ${FAISS_SRC})
 
+# Enable AVX2 for ACORN SIMD-BP128 neighbor decompression
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  set_source_files_properties(IndexACORN.cpp impl/ACORN.cpp
+    PROPERTIES COMPILE_OPTIONS "-mavx2")
+endif()
+
 add_library(faiss_avx2 ${FAISS_SRC})
 if(NOT FAISS_OPT_LEVEL STREQUAL "avx2")
   set_target_properties(faiss_avx2 PROPERTIES EXCLUDE_FROM_ALL TRUE)

@@ -17,3 +17,19 @@
 /tests/test
 /tests/gtest/
 faiss/python/swigfaiss_avx2.swig
+
+# Build directories & compiled Windows/Linux binaries
+/build/
+/build-*/
+*.exe
+*.dll
+*.lib
+*.obj
+
+# Large raw datasets & temporary downloads (reproducible via scripts/download_*.py)
+/Datasets/
+*.fvecs
+*.ivecs
+*.bvecs
+*.parquet
+planing/ACORN_SIGMOD24_Original_Paper.pdf

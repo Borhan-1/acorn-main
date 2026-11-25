@@ -7,6 +7,7 @@
 
 // -*- c++ -*-
 
+#include <chrono>
 #include <faiss/impl/ACORN.h>
 
 #include <string>
@@ -38,7 +39,8 @@ void debugTime() {
 	if (debugFlag || debugSearchFlag) {
         struct timeval tval;
         gettimeofday(&tval, NULL);
-        struct tm *tm_info = localtime(&tval.tv_sec);
+        time_t sec = tval.tv_sec;
+        struct tm *tm_info = localtime(&sec);
         char timeBuff[25] = "";
         strftime(timeBuff, 25, "%H:%M:%S", tm_info);
         char timeBuffWithMilli[50] = "";
@@ -112,6 +114,12 @@ int ACORN::cum_nb_neighbors(int layer_no) const {
 void ACORN::neighbor_range(idx_t no, int layer_no, size_t* begin, size_t* end)
         const {
     size_t o = offsets[no];
+    if (l0_freed && layer_no > 0) {
+        size_t l0_size = static_cast<size_t>(nb_neighbors(0));
+        *begin = o + cum_nb_neighbors(layer_no) - l0_size;
+        *end = o + cum_nb_neighbors(layer_no + 1) - l0_size;
+        return;
+    }
     // debug("offset o: %ld\n", o);
     *begin = o + cum_nb_neighbors(layer_no);
     // debug("begin: %ln\n", begin);
@@ -187,6 +195,15 @@ void ACORN::reset() {
     offsets.push_back(0);
     levels.clear();
     neighbors.clear();
+    use_compressed_l0 = false;
+    l0_freed = false;
+    l0_compression_mode = L0CompressionMode::NONE;
+    compressed_l0_neighbors.clear();
+    compressed_l0_offsets.clear();
+    compressed_l0_counts.clear();
+    compressed_l0_prefix_counts.clear();
+    has_overflow.clear();
+    overflow_l0.clear();
 }
 
 
@@ -1058,7 +1075,7 @@ void ACORN::add_with_locks(
     float d_nearest = ptdis(nearest);
 
     // needed for backtracking in hybrid search - TODO DEPRECATED, remove backtracking things
-    std::vector<storage_idx_t> ep_per_level(max_level); // idx of nearest node per level
+    std::vector<storage_idx_t> ep_per_level(max_level + 1); // idx of nearest node per level
     ep_per_level[level] = nearest;
 
     for (; level > pt_level; level--) {
@@ -1134,6 +1151,8 @@ int search_from_candidates(
     }
 
     int nstep = 0;
+    int32_t dec_buf[1024];
+    const bool time_decode = params && params->enable_decode_timing;
 
     while (candidates.size() > 0) { // candidates is heap of size max(efs, k)
         float d0 = 0;
@@ -1150,11 +1169,30 @@ int search_from_candidates(
             }
         }
 
-        size_t begin, end;
-        hnsw.neighbor_range(v0, level, &begin, &end);
+        const int32_t* neigh_ptr = nullptr;
+        size_t neigh_len = 0;
+        if (level == 0 && hnsw.use_compressed_l0) {
+            if (time_decode) {
+                auto td0 = std::chrono::steady_clock::now();
+                neigh_len = hnsw.decode_l0_neighbors(v0, dec_buf);
+                auto td1 = std::chrono::steady_clock::now();
+                stats.decode_time_us +=
+                        std::chrono::duration<double, std::micro>(td1 - td0).count();
+            } else {
+                neigh_len = hnsw.decode_l0_neighbors(v0, dec_buf);
+            }
+            stats.decode_calls++;
+            stats.decoded_edges += neigh_len;
+            neigh_ptr = dec_buf;
+        } else {
+            size_t begin, end;
+            hnsw.neighbor_range(v0, level, &begin, &end);
+            neigh_ptr = hnsw.neighbors.data() + begin;
+            neigh_len = end - begin;
+        }
 
-        for (size_t j = begin; j < end; j++) {
-            int v1 = hnsw.neighbors[j];
+        for (size_t j = 0; j < neigh_len; j++) {
+            int v1 = neigh_ptr[j];
             if (v1 < 0)
                 break;
             if (vt.get(v1)) {
@@ -1234,6 +1272,9 @@ int hybrid_search_from_candidates(
     }
 
     int nstep = 0;
+    int32_t dec_buf1[1024];
+    int32_t dec_buf2[1024];
+    const bool time_decode = params && params->enable_decode_timing;
 
 
     // timing variables
@@ -1256,8 +1297,27 @@ int hybrid_search_from_candidates(
             }
         }
 
-        size_t begin, end;
-        hnsw.neighbor_range(v0, level, &begin, &end);
+        const int32_t* neigh_ptr = nullptr;
+        size_t neigh_len = 0;
+        if (level == 0 && hnsw.use_compressed_l0) {
+            if (time_decode) {
+                auto td0 = std::chrono::steady_clock::now();
+                neigh_len = hnsw.decode_l0_neighbors(v0, dec_buf1);
+                auto td1 = std::chrono::steady_clock::now();
+                stats.decode_time_us +=
+                        std::chrono::duration<double, std::micro>(td1 - td0).count();
+            } else {
+                neigh_len = hnsw.decode_l0_neighbors(v0, dec_buf1);
+            }
+            stats.decode_calls++;
+            stats.decoded_edges += neigh_len;
+            neigh_ptr = dec_buf1;
+        } else {
+            size_t begin, end;
+            hnsw.neighbor_range(v0, level, &begin, &end);
+            neigh_ptr = hnsw.neighbors.data() + begin;
+            neigh_len = end - begin;
+        }
 
         // variable to keep track of search expansion
         int num_found = 0;
@@ -1268,14 +1328,14 @@ int hybrid_search_from_candidates(
         std::vector<std::pair<storage_idx_t, int>> neighbors_checked;
 
         double t1_neighbors_loop = elapsed();
-        for (size_t j = begin; j < end; j++) {
+        for (size_t j = 0; j < neigh_len; j++) {
             // auto [v1, metadata] = hnsw.neighbors[j];
             bool promising = 0;
             bool outerskip = false;
 
-            auto v1 = hnsw.neighbors[j];
+            auto v1 = neigh_ptr[j];
             // auto metadata = hnsw.metadata[v1];
-            // debug_search("------------visiting neighbor (%ld) - %d, metadata: %d\n", j-begin, v1, metadata);
+            // debug_search("------------visiting neighbor (%ld) - %d, metadata: %d\n", j, v1, metadata);
 
 
             if (v1 < 0) {
@@ -1324,14 +1384,33 @@ int hybrid_search_from_candidates(
                 }
             }    
             
-            if (((j - begin >= hnsw.M_beta) && keep_expanding) || hnsw.gamma == 1) {
-                debug_search("------------expanding neighbor list for %d; neighbor %ld, hnsw.M_beta: %d\n", v1, j-begin, hnsw.M_beta);
-                size_t begin2, end2;
-                hnsw.neighbor_range(v1, level, &begin2, &end2);
+            if (((j >= static_cast<size_t>(hnsw.M_beta)) && keep_expanding) || hnsw.gamma == 1) {
+                debug_search("------------expanding neighbor list for %d; neighbor %ld, hnsw.M_beta: %d\n", v1, j, hnsw.M_beta);
+                const int32_t* neigh_ptr2 = nullptr;
+                size_t neigh_len2 = 0;
+                if (level == 0 && hnsw.use_compressed_l0) {
+                    if (time_decode) {
+                        auto td0 = std::chrono::steady_clock::now();
+                        neigh_len2 = hnsw.decode_l0_neighbors(v1, dec_buf2);
+                        auto td1 = std::chrono::steady_clock::now();
+                        stats.decode_time_us +=
+                                std::chrono::duration<double, std::micro>(td1 - td0).count();
+                    } else {
+                        neigh_len2 = hnsw.decode_l0_neighbors(v1, dec_buf2);
+                    }
+                    stats.decode_calls++;
+                    stats.decoded_edges += neigh_len2;
+                    neigh_ptr2 = dec_buf2;
+                } else {
+                    size_t begin2, end2;
+                    hnsw.neighbor_range(v1, level, &begin2, &end2);
+                    neigh_ptr2 = hnsw.neighbors.data() + begin2;
+                    neigh_len2 = end2 - begin2;
+                }
                 // try to parallelize neighbor expansion
-                for (size_t j2 = begin2; j2 < end2; j2+=1) {
+                for (size_t j2 = 0; j2 < neigh_len2; j2+=1) {
                     
-                    auto v2 = hnsw.neighbors[j2];
+                    auto v2 = neigh_ptr2[j2];
 
                     // note that this slows down search performance significantly when flag is on
                     // if (debugSearchFlag) {
