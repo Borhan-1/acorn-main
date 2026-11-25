@@ -1341,9 +1341,10 @@ int main(int argc, char** argv) try {
                     gt.data(), gt_stride, cfg.ef_list, "Stage 2: BFS Reordered (Uncompressed)");
         }
 
-        // Stage 3: VByte and/or AVX2 SIMD-BP128 Compression
-        if (cfg.codec == "both") {
-            // Stage 3A: Option A (Scalar VByte, keep L0 temporarily so 3B can run on exact same index)
+        // Stage 3: VByte, Elias-Fano, and/or AVX2 SIMD-BP128 Compression
+        if (cfg.codec == "both" || cfg.codec == "all") {
+            const bool run_ef = (cfg.codec == "all");
+            // Stage 3A: Option A (Scalar VByte, keep L0 temporarily so subsequent codecs run on exact same index)
             auto t_vb0 = std::chrono::high_resolution_clock::now();
             index.compress_neighbors_vbyte(false);
             auto t_vb1 = std::chrono::high_resolution_clock::now();
@@ -1369,6 +1370,34 @@ int main(int argc, char** argv) try {
             if (cfg.mt_qps) {
                 run_mt_qps_suite(index, xq.data(), nq, d_base, cfg.k, is_filtered, active_filter_map, !cfg.no_reorder_compress, 64, "Option A (VByte)");
                 run_mt_qps_suite(index, xq.data(), nq, d_base, cfg.k, is_filtered, active_filter_map, !cfg.no_reorder_compress, 128, "Option A (VByte)");
+            }
+
+            // Optional Stage 3E: Elias-Fano Baseline (keep L0 temporarily so 3B runs on exact same index)
+            std::vector<SearchRunResult> res_ef;
+            double ef_graph_mb = 0.0;
+            double ef_savings_pct = 0.0;
+            if (run_ef) {
+                auto t_ef0 = std::chrono::high_resolution_clock::now();
+                index.compress_neighbors_elias_fano(false, cfg.proximity_prefix);
+                auto t_ef1 = std::chrono::high_resolution_clock::now();
+                double ef_comp_s = std::chrono::duration<double>(t_ef1 - t_ef0).count();
+                auto mem_ef_raw = measure_graph_memory(index);
+                ef_graph_mb = (mem_ef_raw.neighbors_mb - l0_raw_mb) + mem_ef_raw.offsets_levels_mb +
+                        mem_ef_raw.vbyte_payload_mb + mem_ef_raw.vbyte_meta_mb;
+                ef_savings_pct = 100.0 * (1.0 - ef_graph_mb / mem_vanilla.total_graph_mb);
+
+                std::cout << "\n--- Stage 3E: Baseline (Elias-Fano) Summary ---\n";
+                std::cout << "Elias-Fano time:     " << std::setprecision(3) << ef_comp_s
+                          << " s (proximity_prefix=" << cfg.proximity_prefix << ")\n";
+                std::cout << "Elias-Fano Graph MB: " << std::setprecision(2) << ef_graph_mb
+                          << " MB (payload=" << mem_ef_raw.vbyte_payload_mb
+                          << ", meta=" << mem_ef_raw.vbyte_meta_mb << ")  -->  "
+                          << ef_savings_pct << "% savings\n";
+
+                res_ef = run_search_suite(
+                        index, xq.data(), nq, d_base, cfg.k, is_filtered, active_filter_map,
+                        !cfg.no_reorder_compress, cfg.profile_decode, gt.data(), gt_stride, cfg.ef_list,
+                        "Stage 3E: Baseline — Reordered + Elias-Fano");
             }
 
             // Stage 3B: Option B (AVX2 SIMD-BP128, free uncompressed L0)
@@ -1405,23 +1434,49 @@ int main(int argc, char** argv) try {
                 run_mt_qps_suite(index, xq.data(), nq, d_base, cfg.k, is_filtered, active_filter_map, !cfg.no_reorder_compress, 128, "Option B (AVX2 SIMD)");
             }
 
-            std::cout << "\n=== 3-Way Ablation Summary (Vanilla vs VByte vs AVX2 SIMD-BP128) ===\n";
-            std::cout << "| efSearch | Van R@" << cfg.k << " | VByte R@" << cfg.k
-                      << " | SIMD R@" << cfg.k << " | Van p50 | VByte p50 | SIMD p50 | SIMD vs Van | SIMD vs VByte |\n";
-            std::cout << "|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n";
-            for (size_t i = 0; i < res_vanilla.size(); ++i) {
-                double ovh_van = 100.0 * (res_bp[i].p50_ms - res_vanilla[i].p50_ms) / res_vanilla[i].p50_ms;
-                double ovh_vb = 100.0 * (res_bp[i].p50_ms - res_vbyte[i].p50_ms) / res_vbyte[i].p50_ms;
-                std::cout << "| " << res_vanilla[i].efs
-                          << " | " << std::setprecision(4) << res_vanilla[i].recall
-                          << " | " << std::setprecision(4) << res_vbyte[i].recall
-                          << " | " << std::setprecision(4) << res_bp[i].recall
-                          << " | " << std::setprecision(3) << res_vanilla[i].p50_ms << " ms"
-                          << " | " << std::setprecision(3) << res_vbyte[i].p50_ms << " ms"
-                          << " | " << std::setprecision(3) << res_bp[i].p50_ms << " ms"
-                          << " | " << std::showpos << std::setprecision(1) << ovh_van << "%"
-                          << " | " << std::setprecision(1) << ovh_vb << "%" << std::noshowpos
-                          << " |\n";
+            if (run_ef) {
+                std::cout << "\n=== 4-Way Ablation Summary (Vanilla vs VByte vs Elias-Fano vs AVX2 SIMD-BP128) ===\n";
+                std::cout << "Graph RAM: Vanilla=" << std::setprecision(2) << mem_vanilla.total_graph_mb
+                          << " MB | VByte=" << vb_graph_mb << " MB (-" << vb_savings_pct
+                          << "%) | Elias-Fano=" << ef_graph_mb << " MB (-" << ef_savings_pct
+                          << "%) | SIMD-BP128=" << mem_bp.total_graph_mb << " MB (-" << bp_savings_pct << "%)\n";
+                std::cout << "| efSearch | Van R@" << cfg.k << " | EF R@" << cfg.k
+                          << " | SIMD R@" << cfg.k << " | Van p50 | VByte p50 | EF p50 | SIMD p50 | SIMD vs Van | SIMD vs EF |\n";
+                std::cout << "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n";
+                for (size_t i = 0; i < res_vanilla.size(); ++i) {
+                    double ovh_van = 100.0 * (res_bp[i].p50_ms - res_vanilla[i].p50_ms) / res_vanilla[i].p50_ms;
+                    double ovh_ef = 100.0 * (res_bp[i].p50_ms - res_ef[i].p50_ms) / res_ef[i].p50_ms;
+                    std::cout << "| " << res_vanilla[i].efs
+                              << " | " << std::setprecision(4) << res_vanilla[i].recall
+                              << " | " << std::setprecision(4) << res_ef[i].recall
+                              << " | " << std::setprecision(4) << res_bp[i].recall
+                              << " | " << std::setprecision(3) << res_vanilla[i].p50_ms << " ms"
+                              << " | " << std::setprecision(3) << res_vbyte[i].p50_ms << " ms"
+                              << " | " << std::setprecision(3) << res_ef[i].p50_ms << " ms"
+                              << " | " << std::setprecision(3) << res_bp[i].p50_ms << " ms"
+                              << " | " << std::showpos << std::setprecision(1) << ovh_van << "%"
+                              << " | " << std::setprecision(1) << ovh_ef << "%" << std::noshowpos
+                              << " |\n";
+                }
+            } else {
+                std::cout << "\n=== 3-Way Ablation Summary (Vanilla vs VByte vs AVX2 SIMD-BP128) ===\n";
+                std::cout << "| efSearch | Van R@" << cfg.k << " | VByte R@" << cfg.k
+                          << " | SIMD R@" << cfg.k << " | Van p50 | VByte p50 | SIMD p50 | SIMD vs Van | SIMD vs VByte |\n";
+                std::cout << "|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n";
+                for (size_t i = 0; i < res_vanilla.size(); ++i) {
+                    double ovh_van = 100.0 * (res_bp[i].p50_ms - res_vanilla[i].p50_ms) / res_vanilla[i].p50_ms;
+                    double ovh_vb = 100.0 * (res_bp[i].p50_ms - res_vbyte[i].p50_ms) / res_vbyte[i].p50_ms;
+                    std::cout << "| " << res_vanilla[i].efs
+                              << " | " << std::setprecision(4) << res_vanilla[i].recall
+                              << " | " << std::setprecision(4) << res_vbyte[i].recall
+                              << " | " << std::setprecision(4) << res_bp[i].recall
+                              << " | " << std::setprecision(3) << res_vanilla[i].p50_ms << " ms"
+                              << " | " << std::setprecision(3) << res_vbyte[i].p50_ms << " ms"
+                              << " | " << std::setprecision(3) << res_bp[i].p50_ms << " ms"
+                              << " | " << std::showpos << std::setprecision(1) << ovh_van << "%"
+                              << " | " << std::setprecision(1) << ovh_vb << "%" << std::noshowpos
+                              << " |\n";
+                }
             }
             return 0;
         }
@@ -1512,11 +1567,14 @@ int main(int argc, char** argv) try {
             return 0;
         }
 
-        // Single-codec Stage 3 (vbyte or simd_bp128)
+        // Single-codec Stage 3 (vbyte, elias_fano, or simd_bp128)
         bool use_simd = (cfg.codec == "simd_bp128");
+        bool use_ef = (cfg.codec == "elias_fano");
         auto t_c0 = std::chrono::high_resolution_clock::now();
         if (use_simd) {
             index.compress_neighbors_simd_bp128(true, cfg.proximity_prefix);
+        } else if (use_ef) {
+            index.compress_neighbors_elias_fano(true, cfg.proximity_prefix);
         } else {
             index.compress_neighbors_vbyte(true);
         }

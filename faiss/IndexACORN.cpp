@@ -958,6 +958,109 @@ void IndexACORN::compress_neighbors_simd_bp128(
     }
 }
 
+void IndexACORN::compress_neighbors_elias_fano(
+        bool free_uncompressed_l0,
+        int proximity_prefix) {
+    if (ntotal == 0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            !acorn.l0_freed,
+            "Uncompressed Level-0 neighbors have already been freed");
+
+    const size_t n = static_cast<size_t>(ntotal);
+    const size_t split_limit = (acorn.gamma > 1 && acorn.M_beta > 0)
+            ? static_cast<size_t>(acorn.M_beta)
+            : (proximity_prefix > 0 ? static_cast<size_t>(proximity_prefix) : 0);
+    const bool use_two_segments = (split_limit > 0);
+
+    acorn.compressed_l0_neighbors.clear();
+    acorn.compressed_l0_neighbors.reserve(n * 112);
+    acorn.compressed_l0_offsets.assign(n + 1, 0);
+    acorn.compressed_l0_counts.assign(n, 0);
+    if (use_two_segments) {
+        acorn.compressed_l0_prefix_counts.assign(n, 0);
+    } else {
+        acorn.compressed_l0_prefix_counts.clear();
+    }
+
+    std::vector<int32_t> tmp;
+    tmp.reserve(static_cast<size_t>(acorn.nb_neighbors(0)));
+
+    for (size_t i = 0; i < n; i++) {
+        size_t begin = 0, end = 0;
+        acorn.neighbor_range(static_cast<idx_t>(i), 0, &begin, &end);
+        tmp.clear();
+        for (size_t j = begin; j < end; j++) {
+            storage_idx_t v = acorn.neighbors[j];
+            if (v < 0) {
+                break;
+            }
+            tmp.push_back(v);
+        }
+
+        const size_t count = tmp.size();
+        acorn.compressed_l0_counts[i] = static_cast<uint16_t>(count);
+
+        if (count > 0) {
+            if (!use_two_segments) {
+                std::sort(tmp.begin(), tmp.end());
+                codec::EliasFanoCodec::encode_delta_list(
+                        tmp.data(), count, acorn.compressed_l0_neighbors);
+            } else {
+                size_t split = std::min(count, split_limit);
+                acorn.compressed_l0_prefix_counts[i] = static_cast<uint16_t>(split);
+                std::sort(tmp.begin(), tmp.begin() + split);
+                codec::EliasFanoCodec::encode_delta_list(
+                        tmp.data(), split, acorn.compressed_l0_neighbors);
+                if (count > split) {
+                    std::sort(tmp.begin() + split, tmp.end());
+                    codec::EliasFanoCodec::encode_delta_list(
+                            tmp.data() + split,
+                            count - split,
+                            acorn.compressed_l0_neighbors);
+                }
+            }
+        }
+        acorn.compressed_l0_offsets[i + 1] = acorn.compressed_l0_neighbors.size();
+    }
+
+    acorn.compressed_l0_neighbors.resize(
+            acorn.compressed_l0_neighbors.size() + codec::EliasFanoCodec::PADDING_BYTES,
+            0);
+    acorn.compressed_l0_neighbors.shrink_to_fit();
+    acorn.use_compressed_l0 = true;
+    acorn.l0_compression_mode = ACORN::L0CompressionMode::ELIAS_FANO;
+
+    if (free_uncompressed_l0) {
+        const size_t l0_slots = static_cast<size_t>(acorn.nb_neighbors(0));
+        std::vector<size_t> upper_offsets(n + 1, 0);
+        for (size_t i = 0; i < n; i++) {
+            size_t total_slots = static_cast<size_t>(acorn.cum_nb_neighbors(acorn.levels[i]));
+            size_t upper_slots = (total_slots > l0_slots) ? (total_slots - l0_slots) : 0;
+            upper_offsets[i + 1] = upper_offsets[i] + upper_slots;
+        }
+
+        std::vector<ACORN::NeighNode> upper_neighbors(
+                upper_offsets[n], ACORN::NeighNode(-1));
+        for (size_t i = 0; i < n; i++) {
+            size_t upper_slots = upper_offsets[i + 1] - upper_offsets[i];
+            if (upper_slots > 0) {
+                size_t old_upper_begin = acorn.offsets[i] + l0_slots;
+                std::memcpy(
+                        upper_neighbors.data() + upper_offsets[i],
+                        acorn.neighbors.data() + old_upper_begin,
+                        upper_slots * sizeof(ACORN::NeighNode));
+            }
+        }
+
+        acorn.offsets.swap(upper_offsets);
+        acorn.neighbors.swap(upper_neighbors);
+        std::vector<ACORN::NeighNode>().swap(upper_neighbors);
+        acorn.l0_freed = true;
+    }
+}
+
 void IndexACORN::enable_dynamic_gaps(double gap_ratio, size_t cluster_size) {
     if (ntotal == 0 || gap_ratio <= 0.0) {
         return;

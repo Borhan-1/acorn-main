@@ -115,6 +115,11 @@ struct IndexACORN : Index {
             bool free_uncompressed_l0 = true,
             int proximity_prefix = 16);
 
+    /// Compress Level-0 neighbor lists using Base-Separated Elias-Fano coding (baseline).
+    void compress_neighbors_elias_fano(
+            bool free_uncompressed_l0 = true,
+            int proximity_prefix = 16);
+
     /// Part 3D: Expand a reordered index into a Cluster-Gapped ID space before compression,
     /// leaving `gap_ratio` free ID slots at the end of every `cluster_size`-node BFS block.
     void enable_dynamic_gaps(double gap_ratio = 0.05, size_t cluster_size = 1000);

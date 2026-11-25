@@ -18,6 +18,7 @@
 
 #include <faiss/Index.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/impl/codec/elias_fano_codec.h>
 #include <faiss/impl/codec/simd_bp128.h>
 #include <faiss/impl/codec/vbyte_codec.h>
 #include <faiss/impl/platform_macros.h>
@@ -123,8 +124,8 @@ struct ACORN {
     /// for all levels. this is where all storage goes.
     std::vector<NeighNode> neighbors; // changed to add metadata
 
-    // Compressed Level-0 neighbor storage (Option A: VByte, Option B: AVX2 SIMD-BP128)
-    enum class L0CompressionMode : uint8_t { NONE = 0, VBYTE = 1, SIMD_BP128 = 2 };
+    // Compressed Level-0 neighbor storage (VByte, AVX2 SIMD-BP128, Elias-Fano)
+    enum class L0CompressionMode : uint8_t { NONE = 0, VBYTE = 1, SIMD_BP128 = 2, ELIAS_FANO = 3 };
     bool use_compressed_l0 = false;
     bool l0_freed = false;
     L0CompressionMode l0_compression_mode = L0CompressionMode::NONE;
@@ -154,6 +155,18 @@ struct ACORN {
                             ptr, split, out_buf);
                     if (count > split) {
                         codec::SimdBP128Codec::decode_delta_list(
+                                p, count - split, out_buf + split);
+                    }
+                }
+            } else if (l0_compression_mode == L0CompressionMode::ELIAS_FANO) {
+                if (compressed_l0_prefix_counts.empty()) {
+                    codec::EliasFanoCodec::decode_delta_list(ptr, count, out_buf);
+                } else {
+                    size_t split = compressed_l0_prefix_counts[no];
+                    const uint8_t* p = codec::EliasFanoCodec::decode_delta_list(
+                            ptr, split, out_buf);
+                    if (count > split) {
+                        codec::EliasFanoCodec::decode_delta_list(
                                 p, count - split, out_buf + split);
                     }
                 }

@@ -18,7 +18,7 @@
 | **Phase 3.5** | Real Correlated / Compound `AND` / Zipfian Predicates, 6-Selectivity Crossover, `P` Sweep, `DBpedia-OpenAI` (`1,536-d`) | 8 GiB Laptop | ✅ **Completed** |
 | **Phase 4** | 6 Camera-Ready Figures (PNG+PDF), Formal Proofs (Props 1–4), LaTeX Tables, Full Manuscript (`Rev 1–4`) | 8 GiB Laptop | ✅ **Completed** |
 | **Step A** | Live GitHub Repo Sync, Section 7 URL Fix, Peak Permutation RAM Clarification, Fixed-Point README Table | 8 GiB Laptop | ✅ **Completed** |
-| **Track B** | **High-ROI Reviewer-Proof Upgrades:** Elias-Fano Baseline, 5-Run 95% CI, Memory–Latency Pareto, In-Place Permutation, Index Serialization | 8 GiB Laptop | ⏳ **Planned** |
+| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅ Done); `B.2` 5-Run 95% CI, `B.3` Memory–Latency Pareto, `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (1/5)** |
 | **Track C** | **Large-Scale Server Validation:** `10M` & `100M` Datasets, Exact Server Ground Truth, `4–64` Thread Scaling | 128 GiB+ Linux Server | ⏳ **Planned** |
 | **Track D** | **Submission & Dissemination:** Journal LaTeX Template, arXiv Preprint, Zenodo DOI, Journal Submission | Any | ⏳ **Planned** |
 
@@ -79,9 +79,10 @@
 ### Track B — High-Impact Upgrades (Runnable on Current 8 GiB Laptop 💻)
 These upgrades directly neutralize the top reviewer objections **without needing a 128 GiB server**:
 
-- [ ] **B.1 — Elias-Fano Compressed-Adjacency Baseline (`Highest Priority`):**
-  - **Why:** Reviewers will almost certainly ask *"Why not Elias-Fano encoding for sorted integer adjacency lists?"*
-  - **Scope:** Implement `faiss/impl/codec/elias_fano_codec.h` (split upper unary / lower fixed-width bits with fast `select1` / bit-extraction), wire `--codec elias_fano` into `ACORN` & `bench_acorn_sift1m.cpp`, and benchmark compression ratio (B/edge), decode speed (ns/edge), and end-to-end filtered `p50` latency vs. `VByte` and `SimdBP128Codec` on `SIFT1M`, `GloVe-400K`, and `DBpedia-OpenAI`.
+- [x] **B.1 — Elias-Fano Compressed-Adjacency Baseline (`✅ Completed`):**
+  - **Implemented:** `faiss/impl/codec/elias_fano_codec.h` (Base-Separated Elias-Fano + 64-bit `ctzll` decoder), `tests/test_elias_fano.cpp` (`3,275` exhaustive cases + `16` two-segment splits passed; `5.89×` slower decode than AVX2 SIMD-BP128 at `19.94` vs. `3.38 ns/edge`), wired into `ACORN.h`, `IndexACORN.h/.cpp`, and `bench_acorn_sift1m.cpp` (`--codec all`).
+  - **Measured 4-Way Results (`σ=1%`):** Across `SIFT1M` (`126.80` vs. `130.66 MiB`), `GloVe-400K` (`45.82` vs. `46.90 MiB`), and `DBpedia-OpenAI` (`11.58` vs. `11.94 MiB`), Elias-Fano saves only `0.6–0.9%` more graph RAM while running **`15.8%–25.3%` slower** than AVX2 SIMD-BP128 across every dataset and `efSearch` setting (`ef=128` `p50`: `5.040 → 4.066 ms`, `4.590 → 3.429 ms`, `4.209 → 3.319 ms`).
+  - **Manuscript Updated:** Added to Section 5.1, Section 5.3 (4-way comparison table), and Reference `[25]` (Ottaviano & Venturini, SIGIR 2014).
 - [ ] **B.2 — Multi-Run Statistical Variance & 95% Confidence Intervals (`--runs 5`):**
   - **Why:** Single-run `-1.3%` / `-2.0%` latency differences can be dismissed as noise; 5-run median + 95% CI makes latency claims statistically airtight.
   - **Scope:** Add `--runs <K>` (default `5`) loop to query evaluation in `demos/bench_acorn_sift1m.cpp`, report `median ± 95% CI` (and paired Wilcoxon/t-test significance), and update `tables.tex`, `MANUSCRIPT_DRAFT.md`, and `README.md`.
