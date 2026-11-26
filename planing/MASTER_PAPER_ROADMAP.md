@@ -18,7 +18,7 @@
 | **Phase 3.5** | Real Correlated / Compound `AND` / Zipfian Predicates, 6-Selectivity Crossover, `P` Sweep, `DBpedia-OpenAI` (`1,536-d`) | 8 GiB Laptop | ✅ **Completed** |
 | **Phase 4** | 6 Camera-Ready Figures (PNG+PDF), Formal Proofs (Props 1–4), LaTeX Tables, Full Manuscript (`Rev 1–4`) | 8 GiB Laptop | ✅ **Completed** |
 | **Step A** | Live GitHub Repo Sync, Section 7 URL Fix, Peak Permutation RAM Clarification, Fixed-Point README Table | 8 GiB Laptop | ✅ **Completed** |
-| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅ Done), `B.2` 5-Run 95% CI (✅ Done); `B.3` Memory–Latency Pareto, `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (2/5)** |
+| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅), `B.2` 5-Run 95% CI (✅), `B.3` Memory–Latency Pareto (✅); `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (3/5)** |
 | **Track C** | **Large-Scale Server Validation:** `10M` & `100M` Datasets, Exact Server Ground Truth, `4–64` Thread Scaling | 128 GiB+ Linux Server | ⏳ **Planned** |
 | **Track D** | **Submission & Dissemination:** Journal LaTeX Template, arXiv Preprint, Zenodo DOI, Journal Submission | Any | ⏳ **Planned** |
 
@@ -90,9 +90,9 @@ These upgrades directly neutralize the top reviewer objections **without needing
     - `GloVe-400K`: Vanilla `3.257 ± 0.044 ms` vs. VByte `5.065 ± 0.102 ms` vs. Elias-Fano `4.521 ± 0.040 ms` vs. **SIMD-BP128 `3.460 ± 0.023 ms`** (`-23.5%` vs. EF, `-31.7%` vs. VByte).
     - `DBpedia-OpenAI`: Vanilla `3.427 ± 0.095 ms` vs. VByte `4.253 ± 0.133 ms` vs. Elias-Fano `4.354 ± 0.016 ms` vs. **SIMD-BP128 `3.311 ± 0.035 ms`** (`-3.4%` vs. Van, `-23.9%` vs. EF).
   - **Docs Updated:** `MANUSCRIPT_DRAFT.md` (Sec 5.1 & 5.3) and `README.md` Headline Results table updated with 5-run 95% CIs.
-- [ ] **B.3 — Dedicated Memory vs. Latency Pareto Frontier Plot:**
-  - **Why:** Visually demonstrates the exact space–time dominance of `AVX2 SIMD-BP128` over `Vanilla ACORN`, `Standard HNSW`, `Scalar VByte`, and `Elias-Fano` at a fixed recall target.
-  - **Scope:** Add `fig7_memory_latency_pareto.(png|pdf)` to `benchs/generate_thesis_plots.py` and embed in Section 5.
+- [x] **B.3 — Dedicated Memory vs. Latency Pareto Frontier Plot (`✅ Completed`):**
+  - **Implemented:** Added `plot_fig7_memory_latency_pareto()` to `benchs/generate_thesis_plots.py` and generated camera-ready 300-DPI PNG + vector PDF (`paper_figures/fig7_memory_latency_pareto.(png|pdf)`) plotting Graph Memory (MiB) vs. 5-run `p50 ± 95% CI` across `SIFT1M`, `GloVe-400K`, and `DBpedia-OpenAI` with Standard HNSW vertical reference lines.
+  - **Manuscript Updated:** Embedded as Figure 7 in `MANUSCRIPT_DRAFT.md` (Section 5.3).
 - [ ] **B.4 — In-Place Cycle-Leader Permutation (`apply_acorn_permutation`):**
   - **Why:** Eliminates the temporary `new_codes` copy (`+47.7 GiB` peak RAM at `100M`), reducing extra vector RAM during reordering from $O(N \cdot d)$ to $O(1)$ and strengthening the memory-efficiency claim.
   - **Scope:** Replace out-of-place `new_codes` allocation in `faiss/IndexACORN.cpp` with in-place cycle-leader permutation using a compact `std::vector<uint8_t> visited(n)` (`N` bytes = `100 MB` at `100M`), and verify bit-exactness on `1M SIFT1M`.

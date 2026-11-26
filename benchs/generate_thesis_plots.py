@@ -460,6 +460,88 @@ def plot_fig6_mt_qps_and_dynamic():
     save_fig(fig, "fig6_mt_qps_and_dynamic")
 
 
+def plot_fig7_memory_latency_pareto():
+    """Fig 7: Memory vs. Latency Pareto Frontier (5-run median +/- 95% CI, sigma=1%, ef=128)."""
+    fig, axes = plt.subplots(1, 3, figsize=(12.6, 3.9))
+
+    datasets = [
+        {
+            "title": "(a) SIFT1M (1M x 128-d, R@10=0.978)",
+            "hnsw_mb": 259.52,
+            "xlim": (60, 490),
+            "ylim": (3.2, 6.6),
+            "points": [
+                ("Vanilla ACORN",   442.63, 4.177, 0.047, C_VANILLA, "s", 7.5, (-52, 10)),
+                ("Scalar VByte",    114.66, 6.054, 0.036, C_VBYTE,   "^", 8.0, (8, -4)),
+                ("Elias-Fano",      126.82, 4.982, 0.040, C_PURPLE,  "D", 7.0, (10, -2)),
+                ("Ours (AVX2 BP128)", 130.51, 4.052, 0.054, C_OURS,  "*", 13.0, (10, -14)),
+            ],
+            "pareto_xy": [(114.66, 6.054), (126.82, 4.982), (130.51, 4.052)],
+        },
+        {
+            "title": "(b) GloVe-400K (399K x 100-d, R@10=0.901)",
+            "hnsw_mb": 103.55,
+            "xlim": (20, 198),
+            "ylim": (2.6, 5.6),
+            "points": [
+                ("Vanilla ACORN",   176.61, 3.257, 0.044, C_VANILLA, "s", 7.5, (-54, 10)),
+                ("Scalar VByte",     40.92, 5.065, 0.102, C_VBYTE,   "^", 8.0, (8, -4)),
+                ("Elias-Fano",       45.82, 4.521, 0.040, C_PURPLE,  "D", 7.0, (10, -2)),
+                ("Ours (AVX2 BP128)", 46.88, 3.460, 0.023, C_OURS,   "*", 13.0, (10, -14)),
+            ],
+            "pareto_xy": [(40.92, 5.065), (45.82, 4.521), (46.88, 3.460), (176.61, 3.257)],
+        },
+        {
+            "title": "(c) DBpedia-OpenAI (100K x 1,536-d, R@10=0.980)",
+            "hnsw_mb": 25.96,
+            "xlim": (5, 50),
+            "ylim": (2.8, 4.8),
+            "points": [
+                ("Vanilla ACORN",    44.27, 3.427, 0.095, C_VANILLA, "s", 7.5, (-54, 10)),
+                ("Scalar VByte",      9.42, 4.253, 0.133, C_VBYTE,   "^", 8.0, (7, -14)),
+                ("Elias-Fano",       11.59, 4.354, 0.016, C_PURPLE,  "D", 7.0, (9, 4)),
+                ("Ours (AVX2 BP128)", 11.94, 3.311, 0.035, C_OURS,   "*", 13.0, (9, -12)),
+            ],
+            "pareto_xy": [(9.42, 4.253), (11.94, 3.311)],
+        },
+    ]
+
+    for ax, ds in zip(axes, datasets):
+        # Pareto frontier dashed connector
+        px = [p[0] for p in ds["pareto_xy"]]
+        py = [p[1] for p in ds["pareto_xy"]]
+        ax.plot(px, py, "--", color="#444444", lw=1.2, alpha=0.6, zorder=1, label="Pareto Frontier")
+
+        # Standard HNSW graph memory vertical reference
+        ax.axvline(ds["hnsw_mb"], color=C_HNSW, ls=":", lw=1.6, zorder=1)
+        ax.text(ds["hnsw_mb"] + (ds["xlim"][1] - ds["xlim"][0]) * 0.015,
+                ds["ylim"][1] - (ds["ylim"][1] - ds["ylim"][0]) * 0.06,
+                f"HNSW\n({ds['hnsw_mb']:.0f} MiB;\nR@10<0.13)",
+                fontsize=7.2, color="#9C6500", va="top")
+
+        for name, mb, p50, ci, col, mk, ms, (dx, dy) in ds["points"]:
+            ax.errorbar(mb, p50, yerr=ci, fmt=mk, color=col, markersize=ms,
+                        capsize=3.5, elinewidth=1.4, markeredgecolor="white",
+                        markeredgewidth=0.6, zorder=3, label=name)
+            short_lbl = f"{name.split(' ')[0]}\n({mb:.1f} MiB)" if "Ours" not in name else f"Ours (AVX2)\n{mb:.1f} MiB\n{p50:.2f} ms"
+            fw = "bold" if "Ours" in name else "normal"
+            ax.annotate(short_lbl, xy=(mb, p50), xytext=(dx, dy),
+                        textcoords="offset points", fontsize=7.5, fontweight=fw,
+                        color=col if "Ours" in name else "#222222")
+
+        ax.set_title(ds["title"], fontsize=9.8)
+        ax.set_xlabel("Graph Memory (MiB) — Lower is Better")
+        ax.set_xlim(ds["xlim"])
+        ax.set_ylim(ds["ylim"])
+
+    axes[0].set_ylabel("5-Run Median p50 Latency (ms, ±95% CI)\nLower is Better")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=True,
+               bbox_to_anchor=(0.5, -0.06), fontsize=8.5)
+    fig.tight_layout()
+    save_fig(fig, "fig7_memory_latency_pareto")
+
+
 if __name__ == "__main__":
     plot_fig1_memory_scaling()
     plot_fig2_reordering_and_simd()
@@ -467,4 +549,5 @@ if __name__ == "__main__":
     plot_fig4_prefix_sensitivity()
     plot_fig5_multidomain_pareto()
     plot_fig6_mt_qps_and_dynamic()
-    print("\nAll 6 camera-ready figures generated successfully in ./paper_figures/!")
+    plot_fig7_memory_latency_pareto()
+    print("\nAll 7 camera-ready figures generated successfully in ./paper_figures/!")
