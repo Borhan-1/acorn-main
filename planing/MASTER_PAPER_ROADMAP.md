@@ -18,7 +18,7 @@
 | **Phase 3.5** | Real Correlated / Compound `AND` / Zipfian Predicates, 6-Selectivity Crossover, `P` Sweep, `DBpedia-OpenAI` (`1,536-d`) | 8 GiB Laptop | ✅ **Completed** |
 | **Phase 4** | 6 Camera-Ready Figures (PNG+PDF), Formal Proofs (Props 1–4), LaTeX Tables, Full Manuscript (`Rev 1–4`) | 8 GiB Laptop | ✅ **Completed** |
 | **Step A** | Live GitHub Repo Sync, Section 7 URL Fix, Peak Permutation RAM Clarification, Fixed-Point README Table | 8 GiB Laptop | ✅ **Completed** |
-| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano (✅), `B.2` 5-Run 95% CI (✅), `B.3` Memory–Latency Pareto (✅), `B.4` In-Place Permutation (✅); `B.5` Index Serialization | 8 GiB Laptop | 🔄 **In Progress (4/5)** |
+| **Track B** | **High-ROI Reviewer-Proof Upgrades:** `B.1` Elias-Fano, `B.2` 5-Run 95% CI, `B.3` Memory–Latency Pareto, `B.4` In-Place Permutation, `B.5` Index Serialization | 8 GiB Laptop | ✅ **Completed (5/5)** |
 | **Track C** | **Large-Scale Server Validation:** `10M` & `100M` Datasets, Exact Server Ground Truth, `4–64` Thread Scaling | 128 GiB+ Linux Server | ⏳ **Planned** |
 | **Track D** | **Submission & Dissemination:** Journal LaTeX Template, arXiv Preprint, Zenodo DOI, Journal Submission | Any | ⏳ **Planned** |
 
@@ -96,9 +96,9 @@ These upgrades directly neutralize the top reviewer objections **without needing
 - [x] **B.4 — In-Place Cycle-Leader Permutation (`✅ Completed`):**
   - **Implemented:** Replaced out-of-place `new_codes(n * cs)` copy in `apply_acorn_permutation()` (`faiss/IndexACORN.cpp`) with in-place cycle-leader traversal using a 1-vector scratch buffer (`4d` B) + `1 bit/node` visited bitset (`125 KiB` at `1M`, `12.5 MiB` at `100M`), eliminating the `2×` raw-vector RAM spike (`~47.7 GiB` saved at `100M`).
   - **Verified:** Rebuilt `libfaiss.a` and verified exact `+0.0000` Recall@10 parity on `100K SIFT1M` (`ef=32/128`, `0.081 s` reorder time). Updated `MANUSCRIPT_DRAFT.md` Sections 4.2 & 6.4.
-- [ ] **B.5 — Index Serialization (`Save / Load` to Disk):**
-  - **Why:** Essential prerequisite for `10M–100M` experiments so the graph is built once, saved to disk, and queried across multiple selectivities/predicates without re-building.
-  - **Scope:** Implement binary save/load for `IndexACORNFlat` (uncompressed + compressed L0 + permutation maps) with `--save_index` / `--load_index` flags in `demos/bench_acorn_sift1m.cpp`.
+- [x] **B.5 — Index Serialization (`Save / Load` to Disk — `✅ Completed`):**
+  - **Implemented:** Added versioned 64-bit binary `IndexACORN::save_to_file()` / `load_from_file()` (`magic = "ACRNSM01"`) in `faiss/IndexACORN.h/.cpp` serializing vectors, upper layers, compressed L0 (`VByte` / `Elias-Fano` / `SIMD-BP128`), and permutation maps, plus `--save_index` / `--load_index` CLI flags in `demos/bench_acorn_sift1m.cpp`.
+  - **Verified:** Round-trip save (`0.057 s`) $\to$ load (`0.022 s`) on `50K SIFT1M` produced bit-identical graph RAM (`5.48 MB`), `Recall@10` (`0.9990` / `1.0000`), and `Avg ndis` (`662.9` / `835.0`). Ready for `10M–100M` server builds.
 
 ---
 

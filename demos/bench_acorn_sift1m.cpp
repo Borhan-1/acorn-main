@@ -67,6 +67,8 @@ struct BenchConfig {
     int runs = 1;
     std::vector<int> sweep_prefix;
     std::string data_dir = "Datasets/sift1M";
+    std::string save_index_path;
+    std::string load_index_path;
     std::vector<int> ef_list = {16, 32, 64};
 };
 
@@ -162,6 +164,10 @@ BenchConfig parse_args(int argc, char** argv) {
             cfg.ab_validate = true;
         } else if (arg == "--data_dir") {
             cfg.data_dir = next_val(arg);
+        } else if (arg == "--save_index") {
+            cfg.save_index_path = next_val(arg);
+        } else if (arg == "--load_index") {
+            cfg.load_index_path = next_val(arg);
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: bench_acorn_sift1m [options]\n"
                       << "  --n <N>                 Base vectors (default: 100000, max: 1000000)\n"
@@ -1296,9 +1302,7 @@ int main(int argc, char** argv) try {
         return 0;
     }
 
-    // 4. Build Vanilla ACORN index
-    std::cout << "Building IndexACORNFlat...\n" << std::flush;
-    auto t_build0 = std::chrono::high_resolution_clock::now();
+    // 4. Build or Load IndexACORNFlat
     faiss::IndexACORNFlat index(
             static_cast<int>(d_base),
             cfg.M,
@@ -1307,6 +1311,38 @@ int main(int argc, char** argv) try {
             cfg.M_beta,
             faiss::METRIC_L2);
     index.verbose = false;
+
+    if (!cfg.load_index_path.empty()) {
+        std::vector<float>().swap(xb); // free base vectors before loading serialized index
+        std::cout << "Loading serialized IndexACORNFlat from " << cfg.load_index_path << "...\n";
+        auto tl0 = std::chrono::high_resolution_clock::now();
+        index.load_from_file(cfg.load_index_path);
+        auto tl1 = std::chrono::high_resolution_clock::now();
+        double load_s = std::chrono::duration<double>(tl1 - tl0).count();
+        auto mem_loaded = measure_graph_memory(index);
+        std::cout << "Loaded index (ntotal=" << index.ntotal << ", compressed="
+                  << (index.acorn.use_compressed_l0 ? "yes" : "no")
+                  << ", reordered=" << (index.is_reordered ? "yes" : "no")
+                  << ") in " << std::fixed << std::setprecision(3) << load_s << " s\n";
+        std::cout << "Loaded Graph MB:     " << std::setprecision(2) << mem_loaded.total_graph_mb
+                  << " MB | OS RSS: " << get_process_rss_mb() << " MB\n";
+
+        std::vector<char> loaded_fmap = filter_map;
+        if (is_filtered && index.is_reordered) {
+            loaded_fmap.resize(nb);
+            for (size_t nid = 0; nid < nb; ++nid) {
+                loaded_fmap[nid] = filter_map[index.new_to_old[nid]];
+            }
+        }
+        run_search_suite(
+                index, xq.data(), nq, d_base, cfg.k, is_filtered, loaded_fmap,
+                index.is_reordered, cfg.profile_decode, gt.data(), gt_stride, cfg.ef_list,
+                "Loaded IndexACORNFlat Search Benchmark");
+        return 0;
+    }
+
+    std::cout << "Building IndexACORNFlat...\n" << std::flush;
+    auto t_build0 = std::chrono::high_resolution_clock::now();
     index.add(static_cast<faiss::idx_t>(nb), xb.data());
     auto t_build1 = std::chrono::high_resolution_clock::now();
     double build_s = std::chrono::duration<double>(t_build1 - t_build0).count();
@@ -1654,8 +1690,18 @@ int main(int argc, char** argv) try {
                 index, xq.data(), nq, d_base, cfg.k, is_filtered, active_filter_map,
                 !cfg.no_reorder_compress, cfg.profile_decode, gt.data(), gt_stride, cfg.ef_list,
                 use_simd ? "Stage 3: BFS Reordered + AVX2 SIMD-BP128 (L0 Freed)"
-                         : (cfg.no_reorder_compress ? "Stage 3: VByte Compressed (NO Reordering)"
-                                                    : "Stage 3: BFS Reordered + VByte Compressed (L0 Freed)"));
+                         : (use_ef ? "Stage 3: BFS Reordered + Elias-Fano (L0 Freed)"
+                                   : (cfg.no_reorder_compress ? "Stage 3: VByte Compressed (NO Reordering)"
+                                                              : "Stage 3: BFS Reordered + VByte Compressed (L0 Freed)")));
+
+        if (!cfg.save_index_path.empty()) {
+            auto ts0 = std::chrono::high_resolution_clock::now();
+            index.save_to_file(cfg.save_index_path);
+            auto ts1 = std::chrono::high_resolution_clock::now();
+            double save_s = std::chrono::duration<double>(ts1 - ts0).count();
+            std::cout << "Saved compressed index to " << cfg.save_index_path
+                      << " in " << std::setprecision(3) << save_s << " s\n";
+        }
 
         // Print A/B Delta Summary
         std::cout << "\n=== A/B Gate Summary (Stage 3 vs Stage 1 Vanilla) ===\n";

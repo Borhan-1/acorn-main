@@ -136,6 +136,13 @@ struct IndexACORN : Index {
     /// Part 3D: Merge Delta-Overflow edges back into the AVX2 SIMD-BP128 compressed L0 array.
     void compact_dynamic_l0(int proximity_prefix = 16);
 
+    /// Serialize the full IndexACORN (vectors, upper layers, compressed L0, permutation maps)
+    /// to a binary file so 10M-100M indexes can be built once and queried repeatedly.
+    void save_to_file(const std::string& path) const;
+
+    /// Load a serialized IndexACORN from a binary file created by save_to_file().
+    void load_from_file(const std::string& path);
+
     
 
     // added for debugging

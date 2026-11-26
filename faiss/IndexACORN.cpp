@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 
 #include <queue>
 #include <unordered_set>
@@ -1395,6 +1396,183 @@ void IndexACORN::compact_dynamic_l0(int proximity_prefix) {
     // Clear Delta-Overflow Buffer cleanly
     acorn.overflow_l0.clear();
     std::fill(acorn.has_overflow.begin(), acorn.has_overflow.end(), 0);
+}
+
+namespace {
+
+template <typename T>
+void acorn_write_pod(std::ofstream& out, const T& v) {
+    out.write(reinterpret_cast<const char*>(&v), sizeof(T));
+}
+
+template <typename T>
+void acorn_write_vec(std::ofstream& out, const std::vector<T>& vec) {
+    uint64_t sz = static_cast<uint64_t>(vec.size());
+    acorn_write_pod(out, sz);
+    if (sz > 0) {
+        out.write(
+                reinterpret_cast<const char*>(vec.data()),
+                static_cast<std::streamsize>(sz * sizeof(T)));
+    }
+}
+
+template <typename T>
+void acorn_read_pod(std::ifstream& in, T& v) {
+    in.read(reinterpret_cast<char*>(&v), sizeof(T));
+}
+
+template <typename T>
+void acorn_read_vec(std::ifstream& in, std::vector<T>& vec) {
+    uint64_t sz = 0;
+    acorn_read_pod(in, sz);
+    vec.resize(static_cast<size_t>(sz));
+    if (sz > 0) {
+        in.read(
+                reinterpret_cast<char*>(vec.data()),
+                static_cast<std::streamsize>(sz * sizeof(T)));
+    }
+}
+
+} // namespace
+
+void IndexACORN::save_to_file(const std::string& path) const {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    FAISS_THROW_IF_NOT_FMT(out.is_open(), "Cannot open %s for writing", path.c_str());
+
+    const char magic[8] = {'A', 'C', 'R', 'N', 'S', 'M', '0', '1'};
+    out.write(magic, 8);
+
+    // Index base metadata
+    int32_t d_i32 = d;
+    int64_t ntotal_i64 = ntotal;
+    int32_t metric_i32 = static_cast<int32_t>(metric_type);
+    uint8_t trained_u8 = is_trained ? 1 : 0;
+    acorn_write_pod(out, d_i32);
+    acorn_write_pod(out, ntotal_i64);
+    acorn_write_pod(out, metric_i32);
+    acorn_write_pod(out, trained_u8);
+
+    // Underlying flat vector storage
+    const auto* flat_codes = dynamic_cast<const IndexFlatCodes*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            flat_codes != nullptr,
+            "save_to_file currently requires IndexFlatCodes-backed storage");
+    uint64_t code_size_u64 = static_cast<uint64_t>(flat_codes->code_size);
+    acorn_write_pod(out, code_size_u64);
+    acorn_write_vec(out, flat_codes->codes);
+
+    // ACORN scalar parameters and state
+    acorn_write_pod(out, acorn.M);
+    acorn_write_pod(out, acorn.gamma);
+    acorn_write_pod(out, acorn.M_beta);
+    acorn_write_pod(out, acorn.entry_point);
+    acorn_write_pod(out, acorn.max_level);
+    acorn_write_pod(out, acorn.efConstruction);
+    acorn_write_pod(out, acorn.efSearch);
+    uint8_t use_comp = acorn.use_compressed_l0 ? 1 : 0;
+    uint8_t l0_freed_u8 = acorn.l0_freed ? 1 : 0;
+    uint8_t mode_u8 = static_cast<uint8_t>(acorn.l0_compression_mode);
+    acorn_write_pod(out, use_comp);
+    acorn_write_pod(out, l0_freed_u8);
+    acorn_write_pod(out, mode_u8);
+
+    // ACORN graph & compressed L0 vectors
+    acorn_write_vec(out, acorn.assign_probas);
+    acorn_write_vec(out, acorn.cum_nneighbor_per_level);
+    acorn_write_vec(out, acorn.levels);
+    acorn_write_vec(out, acorn.nb_per_level);
+    acorn_write_vec(out, acorn.offsets);
+    acorn_write_vec(out, acorn.neighbors);
+    acorn_write_vec(out, acorn.compressed_l0_neighbors);
+    acorn_write_vec(out, acorn.compressed_l0_offsets);
+    acorn_write_vec(out, acorn.compressed_l0_counts);
+    acorn_write_vec(out, acorn.compressed_l0_prefix_counts);
+
+    // Reordering permutation maps & metadata
+    uint8_t reord_u8 = is_reordered ? 1 : 0;
+    acorn_write_pod(out, reord_u8);
+    acorn_write_vec(out, old_to_new);
+    acorn_write_vec(out, new_to_old);
+    acorn_write_vec(out, reordered_metadata);
+
+    FAISS_THROW_IF_NOT_FMT(out.good(), "I/O error while writing %s", path.c_str());
+}
+
+void IndexACORN::load_from_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    FAISS_THROW_IF_NOT_FMT(in.is_open(), "Cannot open %s for reading", path.c_str());
+
+    char magic[8] = {0};
+    in.read(magic, 8);
+    FAISS_THROW_IF_NOT_MSG(
+            std::memcmp(magic, "ACRNSM01", 8) == 0,
+            "Invalid or unsupported ACORN serialized file magic");
+
+    int32_t d_i32 = 0;
+    int64_t ntotal_i64 = 0;
+    int32_t metric_i32 = 0;
+    uint8_t trained_u8 = 0;
+    acorn_read_pod(in, d_i32);
+    acorn_read_pod(in, ntotal_i64);
+    acorn_read_pod(in, metric_i32);
+    acorn_read_pod(in, trained_u8);
+
+    d = d_i32;
+    ntotal = static_cast<idx_t>(ntotal_i64);
+    metric_type = static_cast<MetricType>(metric_i32);
+    is_trained = (trained_u8 != 0);
+
+    auto* flat_codes = dynamic_cast<IndexFlatCodes*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            flat_codes != nullptr,
+            "load_from_file currently requires IndexFlatCodes-backed storage");
+    uint64_t code_size_u64 = 0;
+    acorn_read_pod(in, code_size_u64);
+    flat_codes->d = d;
+    flat_codes->ntotal = ntotal;
+    flat_codes->code_size = static_cast<size_t>(code_size_u64);
+    acorn_read_vec(in, flat_codes->codes);
+
+    acorn_read_pod(in, acorn.M);
+    acorn_read_pod(in, acorn.gamma);
+    acorn_read_pod(in, acorn.M_beta);
+    acorn_read_pod(in, acorn.entry_point);
+    acorn_read_pod(in, acorn.max_level);
+    acorn_read_pod(in, acorn.efConstruction);
+    acorn_read_pod(in, acorn.efSearch);
+    uint8_t use_comp = 0, l0_freed_u8 = 0, mode_u8 = 0;
+    acorn_read_pod(in, use_comp);
+    acorn_read_pod(in, l0_freed_u8);
+    acorn_read_pod(in, mode_u8);
+    acorn.use_compressed_l0 = (use_comp != 0);
+    acorn.l0_freed = (l0_freed_u8 != 0);
+    acorn.l0_compression_mode = static_cast<ACORN::L0CompressionMode>(mode_u8);
+
+    acorn_read_vec(in, acorn.assign_probas);
+    acorn_read_vec(in, acorn.cum_nneighbor_per_level);
+    acorn_read_vec(in, acorn.levels);
+    acorn_read_vec(in, acorn.nb_per_level);
+    acorn_read_vec(in, acorn.offsets);
+    acorn_read_vec(in, acorn.neighbors);
+    acorn_read_vec(in, acorn.compressed_l0_neighbors);
+    acorn_read_vec(in, acorn.compressed_l0_offsets);
+    acorn_read_vec(in, acorn.compressed_l0_counts);
+    acorn_read_vec(in, acorn.compressed_l0_prefix_counts);
+
+    uint8_t reord_u8 = 0;
+    acorn_read_pod(in, reord_u8);
+    is_reordered = (reord_u8 != 0);
+    acorn_read_vec(in, old_to_new);
+    acorn_read_vec(in, new_to_old);
+    acorn_read_vec(in, reordered_metadata);
+    if (!reordered_metadata.empty()) {
+        acorn.metadata = reordered_metadata.data();
+    }
+
+    acorn.has_overflow.clear();
+    acorn.overflow_l0.clear();
+
+    FAISS_THROW_IF_NOT_FMT(in.good(), "I/O error while reading %s", path.c_str());
 }
 
 
