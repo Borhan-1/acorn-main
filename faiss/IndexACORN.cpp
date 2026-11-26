@@ -516,18 +516,36 @@ void apply_acorn_permutation(
     const size_t n = static_cast<size_t>(index.ntotal);
     ACORN& acorn = index.acorn;
 
-    // 1. Permute underlying vector storage (IndexFlatCodes / IndexFlat)
+    // 1. Permute underlying vector storage IN-PLACE via cycle-leader traversal
+    //    (O(1) extra vector RAM + 1 bit/node visited bitset, eliminating 2x vector RAM peak)
     if (auto* flat_codes = dynamic_cast<IndexFlatCodes*>(index.storage)) {
         const size_t cs = flat_codes->code_size;
-        std::vector<uint8_t> new_codes(n * cs);
-        for (size_t new_id = 0; new_id < n; new_id++) {
-            size_t old_id = static_cast<size_t>(new_to_old[new_id]);
-            std::memcpy(
-                    new_codes.data() + new_id * cs,
-                    flat_codes->codes.data() + old_id * cs,
-                    cs);
+        uint8_t* base = flat_codes->codes.data();
+        std::vector<uint64_t> done((n + 63) >> 6, 0ULL);
+        std::vector<uint8_t> tmp_vec(cs);
+
+        for (size_t start = 0; start < n; ++start) {
+            if ((done[start >> 6] >> (start & 63)) & 1ULL) {
+                continue;
+            }
+            size_t first_src = static_cast<size_t>(new_to_old[start]);
+            if (first_src == start) {
+                done[start >> 6] |= (1ULL << (start & 63));
+                continue;
+            }
+            std::memcpy(tmp_vec.data(), base + start * cs, cs);
+            size_t cur = start;
+            while (true) {
+                size_t src = static_cast<size_t>(new_to_old[cur]);
+                done[cur >> 6] |= (1ULL << (cur & 63));
+                if (src == start) {
+                    std::memcpy(base + cur * cs, tmp_vec.data(), cs);
+                    break;
+                }
+                std::memcpy(base + cur * cs, base + src * cs, cs);
+                cur = src;
+            }
         }
-        flat_codes->codes.swap(new_codes);
     } else {
         FAISS_THROW_MSG("Graph reordering currently requires IndexFlatCodes-backed storage");
     }
